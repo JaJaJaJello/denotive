@@ -2,6 +2,8 @@
 
 An evidence-board notebook: **projects → boards → evidence**, tied together with red string.
 
+***Very much an entirely vibe-coded program. I had no direct involvement in the code writing for this besides the original prompt. Even the icon is AI generated through claude Opus 5.5*** I had an idea for a note taking app that i would want that may or may not be a good idea. My style of note-taking is very sporadic, and traditional note taking apps like onenote end up doing more harm than good. This gives me the ability to collate and link sporadic ideas more easily, while also having a built-in history retaining feature for scripts if they are drag and dropped into the evidence board so you know exactly what version corresponds to what data. 
+
 **Run:** `dist\DeNotive\DeNotive.exe` (keep the `_internal` folder next to it).
 **Rebuild:** `build.bat` · **Run from source:** `.venv\Scripts\python.exe run.py`
 
