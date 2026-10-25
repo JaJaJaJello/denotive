@@ -133,9 +133,13 @@ class BoardPage(QWidget):
         self.more_menu.aboutToShow.connect(self._fill_more)
         more.setMenu(self.more_menu)
         tl.addWidget(more)
+        self.coinv_btn = tool_button("coinv", "Co-Investigator — ask an AI what it makes of this board", True,
+                                     color=theme.COINV)
+        self.coinv_btn.clicked.connect(lambda on: self.show_side("coinv" if on else None))
+        tl.addWidget(self.coinv_btn)
         self.insp_btn = tool_button("menu", "Show / hide details panel (I)", True)
         self.insp_btn.setChecked(True)
-        self.insp_btn.clicked.connect(lambda on: self.inspector.setVisible(on))
+        self.insp_btn.clicked.connect(lambda on: self.show_side("details" if on else None))
         tl.addWidget(self.insp_btn)
         root.addWidget(top)
 
@@ -151,6 +155,11 @@ class BoardPage(QWidget):
         body.addWidget(self.canvas, 1)
         self.inspector = BoardInspector(self)
         body.addWidget(self.inspector)
+        from ..widgets.coinvestigator import CoInvestigatorPanel
+        self.coinv = CoInvestigatorPanel(self)
+        self.coinv.setFixedWidth(400)
+        self.coinv.hide()
+        body.addWidget(self.coinv)
         root.addLayout(body, 1)
 
         # overlays
@@ -260,6 +269,7 @@ class BoardPage(QWidget):
         sc.open_item.connect(self._open_item)
         sc.undo_changed.connect(self._update_undo)
         sc.changed.connect(self._scene_changed)
+        self.coinv.set_board(b)
         p = st.project(b["project_id"])
         self.proj_dot.setPixmap(theme.color_dot_icon(p["color"] if p else "#888", 12).pixmap(12, 12))
         self.proj_name.setText(p["name"] if p else "")
@@ -938,9 +948,28 @@ class BoardPage(QWidget):
         if sel:
             self.scene.update_strings(sel, color=c)
 
+    def show_side(self, which):
+        """Right-hand side: 'details' (inspector), 'coinv' (Co-Investigator) or None (hidden)."""
+        self.inspector.setVisible(which == "details")
+        self.coinv.setVisible(which == "coinv")
+        self.insp_btn.setChecked(which == "details")
+        self.coinv_btn.setChecked(which == "coinv")
+        if which == "coinv":
+            self.coinv.refresh_model()
+            self.coinv.input.setFocus()
+
+    def ask_coinv(self, question=None):
+        self.show_side("coinv")
+        if question:
+            self.coinv.ask(question)
+
     def _fill_more(self):
         m = self.more_menu
         m.clear()
+        m.addAction(theme.icon("coinv", 16, theme.COINV), "Ask the Co-Investigator…", self.ask_coinv)
+        m.addAction(theme.icon("copy", 16), "Copy case file (for any AI)", self.coinv.copy_case)
+        m.addAction(theme.icon("download", 16), "Save case file…", self.coinv.save_case)
+        m.addSeparator()
         if not self.is_map():
             m.addAction(theme.icon("edit", 16), "Rename board",
                         lambda: (self.name_edit.setFocus(), self.name_edit.selectAll()))

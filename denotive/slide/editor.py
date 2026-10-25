@@ -1118,7 +1118,23 @@ class EditorPage(QWidget):
         nl = QVBoxLayout(notes_box)
         nl.setContentsMargins(12, 8, 12, 10)
         nl.setSpacing(4)
-        nl.addWidget(section_label("Notes · searchable, exported as speaker notes"))
+        nh = QHBoxLayout()
+        nh.addWidget(section_label("Notes · searchable, exported as speaker notes"))
+        nh.addStretch(1)
+        self.draft_b = QToolButton()
+        self.draft_b.setText(" Draft notes")
+        self.draft_b.setIcon(theme.icon("sparkle", 15, theme.COINV))
+        self.draft_b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.draft_b.setToolTip("Have the Co-Investigator draft notes from this slide and what it's connected to")
+        self.draft_b.setStyleSheet(f"QToolButton {{ color: {theme.COINV}; }}")
+        self.draft_b.clicked.connect(self.draft_notes)
+        nh.addWidget(self.draft_b)
+        nl.addLayout(nh)
+        self._draft_run = None
+        self._draft_timer = QTimer(self)
+        self._draft_timer.setSingleShot(True)
+        self._draft_timer.setInterval(70)
+        self._draft_timer.timeout.connect(self._draft_flush)
         self.notes = QPlainTextEdit()
         self.notes.setPlaceholderText("Flesh out the details here: observations, parameters, file paths, ideas…")
         self.notes.textChanged.connect(self._notes_changed)
@@ -1318,6 +1334,122 @@ class EditorPage(QWidget):
                 it["h"] = evidence_card_height(it["w"], aspect)
                 st.put_item(it)
         self._finish(saved=True, created=created)
+
+    # ---- AI-drafted notes
+    def draft_notes(self):
+        """Streams Co-Investigator notes for this slide into the notes pane (one Ctrl+Z removes them)."""
+        import re as _re
+        from ..ai import casefile, prompts
+        from ..ai.providers import describe, role_config
+        from ..ai.runner import Run, qimage_b64
+        if self._draft_run is not None:
+            self._draft_run.stop()
+            return
+        cfg = role_config("notes")
+        if cfg["provider"] == "none":
+            self.main.open_ai_settings()
+            cfg = role_config("notes")
+            if cfg["provider"] == "none":
+                return
+        sc = self.scene
+        sc.stop_text_edit()
+        title = self.title.text().strip()
+        notes = self.notes.toPlainText()
+        slide_text = "\n".join(t for t in (it.text_content() for it in sc.sorted_items()) if t and t.strip())
+        brief = casefile.evidence_brief(title, slide_text, notes, self.item_id, self.board_id)
+        system = prompts.with_persona(prompts.NOTES_SYSTEM + ("" if title else prompts.TITLE_RULE),
+                                      cfg.get("persona"), notes=True)
+        if cfg["provider"] == "manual":
+            QApplication.clipboard().setText(f"{system}\n\n{brief}")
+            if cfg.get("site"):
+                QDesktopServices.openUrl(QUrl(cfg["site"]))
+            self.main.toast("Prompt copied — paste it into your chatbot (with a screenshot of the slide), "
+                            "then paste the reply into the notes", 5000)
+            return
+        msgs = [{"role": "user", "text": brief + "\n\nThe rendered slide is attached as an image.",
+                 "images": [qimage_b64(sc.render_image(1280))]}]
+        self._draft_title_needed = not title
+        cur = self.notes.textCursor()
+        cur.movePosition(QTextCursor.End)
+        cur.beginEditBlock()
+        cur.insertText(("\n\n" if notes.strip() else "") +
+                       f"✦ Co-Investigator draft ({describe(cfg)}, {time.strftime('%b %d %Y')}):\n")
+        cur.endEditBlock()
+        self._draft_start = cur.position()
+        self._draft_buf = ""
+        self._draft_re = _re
+        self.notes.setReadOnly(True)
+        run = Run(cfg, system, msgs, max_tokens=1200)
+        run.chunk.connect(self._draft_chunk)
+        run.done.connect(self._draft_done)
+        run.failed.connect(self._draft_failed)
+        self._draft_run = run
+        self.draft_b.setText(" Stop drafting")
+        self.draft_b.setIcon(theme.icon("square", 14, theme.COINV))
+        run.start()
+
+    def _draft_chunk(self, piece):
+        self._draft_buf += piece
+        if not self._draft_timer.isActive():
+            self._draft_timer.start()
+
+    def _draft_split(self, text):
+        """Separates an optional first title line ('TITLE: …', 'Title: …', '**Evidence title:** …') from the notes."""
+        re_ = self._draft_re
+        head = r"\s*[*_#]*\s*(?:evidence\s+|suggested\s+)?title\s*[*_]*\s*:"
+        m = re_.match(head + r"\s*(.+?)\s*\n", text, re_.I)
+        if m:
+            return m.group(1).strip(" *_\"'"), text[m.end():]
+        first = text.lstrip(" *_#").lower()
+        if re_.match(head, text, re_.I) or ("\n" not in text and len(first) < 16 and
+                                            ("evidence title".startswith(first) or "title".startswith(first[:5]))):
+            return None, ""  # the title line is still arriving
+        return None, text
+
+    def _draft_flush(self):
+        _, body = self._draft_split(self._draft_buf)
+        cur = QTextCursor(self.notes.document())
+        cur.joinPreviousEditBlock()
+        cur.setPosition(self._draft_start)
+        cur.movePosition(QTextCursor.End, QTextCursor.KeepAnchor)
+        cur.insertText(body.lstrip("\n"))
+        cur.endEditBlock()
+        self.notes.moveCursor(QTextCursor.End)
+
+    def _draft_finish(self):
+        self._draft_run = None
+        self._draft_timer.stop()
+        self.notes.setReadOnly(False)
+        self.draft_b.setText(" Draft notes")
+        self.draft_b.setIcon(theme.icon("sparkle", 15, theme.COINV))
+
+    def _draft_done(self, text):
+        self._draft_buf = text or self._draft_buf
+        self._draft_flush()
+        t, _ = self._draft_split(self._draft_buf + "\n")
+        if t and self._draft_title_needed and not self.title.text().strip():
+            self.title.setText(t)
+        self._draft_finish()
+        self._mark_dirty()
+        self.main.toast("Notes drafted by the Co-Investigator — Ctrl+Z in the notes removes them")
+
+    def _draft_failed(self, msg, login):
+        self._draft_finish()
+        self.notes.undo()  # take back the header line
+        box = QMessageBox(QMessageBox.Warning, "Couldn't draft notes", msg, QMessageBox.Ok, self)
+        if login:
+            b = box.addButton("Sign in to Claude…", QMessageBox.ActionRole)
+        else:
+            b = box.addButton("AI settings…", QMessageBox.ActionRole)
+        box.exec()
+        if box.clickedButton() is b:
+            if login:
+                from ..ai.providers import claude_login, find_claude
+                exe = find_claude()
+                if exe:
+                    claude_login(exe)
+            else:
+                self.main.open_ai_settings()
 
     def export_png(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export slide", (self.title.text() or "evidence") + ".png",

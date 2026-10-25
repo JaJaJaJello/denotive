@@ -91,6 +91,15 @@ def _selftest(app, w, out_dir):
         lines.append(f"pdf pages: {export.export_pdf(str(out / 'selftest.pdf'), [bid])}")
         lines.append(f"pptx slides: {export.export_pptx(str(out / 'selftest.pptx'), [bid])}")
         w.grab().save(str(out / "selftest.png"))
+        from .ai import casefile, providers
+        lines.append(f"case file chars: {len(casefile.board_case(bid, images=True).text)}")
+        lines.append(f"claude app found: {bool(providers.find_claude())}")
+        os.environ.setdefault("ANTHROPIC_API_KEY", "selftest-not-a-key")
+        try:
+            providers.make({"provider": "anthropic", "model": "x"}).list_models()
+            lines.append("https: unexpected success")
+        except providers.AIError as e:
+            lines.append("https: " + ("ok (key rejected as expected)" if "401" in str(e) else str(e)[:120]))
         lines.append("ok")
         code = 0
     except Exception:

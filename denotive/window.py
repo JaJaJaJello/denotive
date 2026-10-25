@@ -256,6 +256,22 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Timeline — DeNotive")
 
     # ------------------------------------------------------------------ search
+    def open_ai_settings(self):
+        from .widgets.aisettings import AISettingsDialog
+        if AISettingsDialog(self).exec():
+            self.board_page.coinv.refresh_model()
+            self.toast("Co-Investigator settings saved")
+
+    def copy_project_case(self, project_id):
+        from .ai import casefile
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            text = casefile.project_case(project_id).text
+        finally:
+            QApplication.restoreOverrideCursor()
+        QApplication.clipboard().setText(text)
+        self.toast("Project case file copied — paste it into any AI chat")
+
     def open_search(self, scope="all", project_id=None):
         st = context.store
         project = board = item = None

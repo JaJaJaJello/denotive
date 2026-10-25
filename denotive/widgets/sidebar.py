@@ -374,6 +374,7 @@ class Sidebar(QWidget):
             ex = m.addMenu(theme.icon("export", 16), "Export project")
             ex.addAction(theme.icon("pdf", 16), "PDF…", lambda: self.main.export_project(pid, "pdf"))
             ex.addAction(theme.icon("slides", 16), "PowerPoint…", lambda: self.main.export_project(pid, "pptx"))
+            ex.addAction(theme.icon("copy", 16), "Case file for AI (copy)", lambda: self.main.copy_project_case(pid))
             m.addSeparator()
             m.addAction(theme.icon("delete", 16), "Delete project…", lambda: self.main.delete_project(pid))
         else:

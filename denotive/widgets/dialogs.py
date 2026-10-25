@@ -96,6 +96,17 @@ class SettingsDialog(QDialog):
         v.addWidget(label("Everything lives in this folder: one database plus an assets folder. A dated copy of the "
                           "database is kept in its backups folder each day.", "Hint", wrap=True))
         v.addWidget(hsep())
+        v.addWidget(section_label("Co-Investigator (AI)"))
+        h_ai = QHBoxLayout()
+        from ..ai.providers import describe, role_config
+        h_ai.addWidget(label(f"Co-Investigator: {describe(role_config('coinv'))}   ·   "
+                             f"Notes: {describe(role_config('notes'))}", "Muted"))
+        h_ai.addStretch(1)
+        ai_b = push_button("AI settings…", "settings")
+        ai_b.clicked.connect(lambda: (self.main.open_ai_settings(), self.close()))
+        h_ai.addWidget(ai_b)
+        v.addLayout(h_ai)
+        v.addWidget(hsep())
         v.addWidget(section_label("Behaviour"))
         self.wheel = QCheckBox("Mouse wheel zooms the board (Ctrl+wheel always zooms; touchpads pan)")
         self.wheel.setChecked(bool(settings.get("wheel_zooms", True)))

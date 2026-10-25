@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS connections(
     label TEXT, data TEXT, created REAL, updated REAL, deleted REAL);
 CREATE INDEX IF NOT EXISTS conn_board ON connections(board_id);
 CREATE TABLE IF NOT EXISTS assets(hash TEXT PRIMARY KEY, ext TEXT, size INTEGER, name TEXT, created REAL);
+CREATE TABLE IF NOT EXISTS chats(scope TEXT PRIMARY KEY, messages TEXT, updated REAL);
 CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
     title, body, kind UNINDEXED, ref UNINDEXED, item UNINDEXED, board UNINDEXED, ver UNINDEXED,
     tokenize='trigram');
@@ -739,6 +740,17 @@ class Store:
                 p.unlink()
         except (OSError, sqlite3.Error):
             pass
+
+    # ------------------------------------------------------------------ Co-Investigator conversations
+    def chat(self, scope):
+        """Messages of the conversation kept for a scope such as 'board:<id>' or 'project:<id>'."""
+        r = self.q1("SELECT messages FROM chats WHERE scope=?", (scope,))
+        return json.loads(r[0]) if r and r[0] else []
+
+    def save_chat(self, scope, messages):
+        self.db.execute("INSERT INTO chats(scope, messages, updated) VALUES(?,?,?) "
+                        "ON CONFLICT(scope) DO UPDATE SET messages=excluded.messages, updated=excluded.updated",
+                        (scope, json.dumps(messages), now()))
 
     def stats(self):
         r = self.q1("""SELECT (SELECT COUNT(*) FROM projects WHERE deleted IS NULL),

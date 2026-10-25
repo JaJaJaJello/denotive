@@ -2,7 +2,8 @@
 import math
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QFontDatabase, QIcon, QPainter, QPen, QPixmap, QRadialGradient
+from PySide6.QtGui import (QBrush, QColor, QFont, QFontDatabase, QIcon, QPainter, QPainterPath, QPen, QPixmap,
+                           QRadialGradient)
 
 from . import geometry
 
@@ -21,6 +22,9 @@ ACCENT_HOVER = "#f0595e"
 ACCENT_DIM = "#3c1b20"
 SELECT = "#5b8cff"
 GOLD = "#f5b544"
+COINV = "#b69cff"        # the Co-Investigator's colour
+COINV_DIM = "#2a2340"
+COINV_PAPER = "#e6defd"  # paper for notes it writes on the board
 OK = "#3dd68c"
 
 UI_FONT = "Segoe UI Variable Text"
@@ -245,7 +249,38 @@ def _draw_board(p, s, color):
     p.drawLine(QPointF(s * 0.31, s * 0.37), QPointF(s * 0.67, s * 0.61))
 
 
+def _star(p, cx, cy, r, color):
+    path = QPainterPath()
+    pts = []
+    for i in range(8):
+        a = -math.pi / 2 + i * math.pi / 4
+        k = r if i % 2 == 0 else r * 0.28
+        pts.append(QPointF(cx + math.cos(a) * k, cy + math.sin(a) * k))
+    path.moveTo(pts[0])
+    for pt in pts[1:]:
+        path.lineTo(pt)
+    path.closeSubpath()
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(color))
+    p.drawPath(path)
+
+
+def _draw_sparkle(p, s, color):
+    _star(p, s * 0.45, s * 0.55, s * 0.36, color)
+    _star(p, s * 0.8, s * 0.2, s * 0.14, color)
+
+
+def _draw_coinv(p, s, color):
+    """Magnifying glass with a spark in the lens: the Co-Investigator."""
+    _pen(p, color, s * 0.085)
+    c = QPointF(s * 0.42, s * 0.42)
+    p.drawEllipse(c, s * 0.27, s * 0.27)
+    p.drawLine(QPointF(s * 0.62, s * 0.62), QPointF(s * 0.86, s * 0.86))
+    _star(p, c.x(), c.y(), s * 0.16, "#b69cff")
+
+
 CUSTOM = {
+    "sparkle": _draw_sparkle, "coinv": _draw_coinv,
     "tool_text": _draw_text_tool, "tool_line": _draw_line_tool, "tool_arrow": _draw_arrow_tool,
     "tool_string": _draw_string_tool, "tool_hand": _draw_hand_tool, "tool_frame": _draw_frame_tool,
     "evidence": _draw_evidence, "textbox": _draw_textbox, "board": _draw_board,

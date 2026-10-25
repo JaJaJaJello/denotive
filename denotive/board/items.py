@@ -317,6 +317,27 @@ class BoardItem(QGraphicsObject):
         th = self.row.get("thumb") or self.data.get("thumb")
         return [th] if th else []
 
+    def by_coinv(self):
+        return self.data.get("author") == "coinv"
+
+    def paint_coinv_badge(self, p, lod, x, y, k=1.0):
+        """A small 'CO-INVESTIGATOR' tag on notes and slides the AI wrote."""
+        if self.w * lod < 90:
+            return
+        f = theme.ui_font(9.5 * k, QFont.Bold)
+        f.setLetterSpacing(QFont.AbsoluteSpacing, 0.8 * k)
+        txt = "CO-INVESTIGATOR"
+        tw = QFontMetricsF(f).horizontalAdvance(txt)
+        r = QRectF(x, y, tw + 26 * k, 17 * k)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#5b3fc4"))
+        p.drawRoundedRect(r, 8.5 * k, 8.5 * k)
+        p.setPen(QColor("#ffffff"))
+        p.setFont(theme.icon_font(9 * k))
+        p.drawText(QRectF(r.x() + 5 * k, r.y(), 12 * k, r.height()), Qt.AlignCenter, theme.GLYPHS["search"])
+        p.setFont(f)
+        p.drawText(QRectF(r.x() + 17 * k, r.y(), tw + 6 * k, r.height()), Qt.AlignVCenter | Qt.AlignLeft, txt)
+
 
 class EvidenceCard(BoardItem):
     KIND = "evidence"
@@ -432,6 +453,8 @@ class EvidenceCard(BoardItem):
                 p.drawRoundedRect(br, 8 * k, 8 * k)
                 p.setPen(QColor("#ffffff"))
                 p.drawText(br, Qt.AlignCenter, txt)
+        if self.by_coinv():
+            self.paint_coinv_badge(p, lod, m + 6 * k, m + 6 * k, k)
         self.paint_pin(p, lod)
         self.paint_selection(p, lod, 3 * k)
 
@@ -765,7 +788,7 @@ class StickyItem(TextHolder):
 
     def text_rect(self):
         p = self.PADDING
-        return self.rect().adjusted(p, p + 8, -p, -p)
+        return self.rect().adjusted(p, p + (32 if self.by_coinv() else 8), -p, -p)
 
     def pin_local(self):
         return QPointF(self.w / 2, 9)
@@ -800,6 +823,8 @@ class StickyItem(TextHolder):
         tri.closeSubpath()
         p.setBrush(fill.darker(122))
         p.drawPath(tri)
+        if self.by_coinv():
+            self.paint_coinv_badge(p, lod, self.PADDING, 18)
         self.paint_text(p, lod)
         self.paint_pin(p, lod)
         self.paint_selection(p, lod, 2)
