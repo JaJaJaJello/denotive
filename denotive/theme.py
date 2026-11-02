@@ -279,8 +279,40 @@ def _draw_coinv(p, s, color):
     _star(p, c.x(), c.y(), s * 0.16, "#b69cff")
 
 
+def _draw_script(sup):
+    def draw(p, s, color):
+        p.setPen(QColor(color))
+        p.setFont(ui_font(s * 0.62, QFont.DemiBold, "Segoe UI"))
+        p.drawText(QRectF(s * 0.02, s * 0.12, s * 0.6, s * 0.78), Qt.AlignCenter, "x")
+        p.setFont(ui_font(s * 0.36, QFont.Bold, "Segoe UI"))
+        p.drawText(QRectF(s * 0.56, s * (0.04 if sup else 0.52), s * 0.4, s * 0.42), Qt.AlignCenter, "2")
+    return draw
+
+
+def _draw_group(ungroup):
+    def draw(p, s, color):
+        pen = QPen(QColor(color), s * 0.06, Qt.DashLine)
+        pen.setDashPattern([2, 1.6])
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        if not ungroup:
+            p.drawRect(QRectF(s * 0.08, s * 0.08, s * 0.84, s * 0.84))
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(color))
+        a = QRectF(s * 0.2, s * 0.2, s * 0.34, s * 0.3)
+        b = QRectF(s * 0.46, s * 0.5, s * 0.34, s * 0.3)
+        if ungroup:
+            a.translate(-s * 0.08, -s * 0.08)
+            b.translate(s * 0.08, s * 0.08)
+        p.drawRoundedRect(a, s * 0.04, s * 0.04)
+        p.setBrush(QColor(color).darker(140) if ungroup else QColor(color))
+        p.drawRoundedRect(b, s * 0.04, s * 0.04)
+    return draw
+
+
 CUSTOM = {
-    "sparkle": _draw_sparkle, "coinv": _draw_coinv,
+    "sparkle": _draw_sparkle, "coinv": _draw_coinv, "group": _draw_group(False), "ungroup": _draw_group(True),
+    "superscript": _draw_script(True), "subscript": _draw_script(False),
     "tool_text": _draw_text_tool, "tool_line": _draw_line_tool, "tool_arrow": _draw_arrow_tool,
     "tool_string": _draw_string_tool, "tool_hand": _draw_hand_tool, "tool_frame": _draw_frame_tool,
     "evidence": _draw_evidence, "textbox": _draw_textbox, "board": _draw_board,

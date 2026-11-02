@@ -94,6 +94,7 @@ def _selftest(app, w, out_dir):
         from .ai import casefile, providers
         lines.append(f"case file chars: {len(casefile.board_case(bid, images=True).text)}")
         lines.append(f"claude app found: {bool(providers.find_claude())}")
+        lines.append(f"codex tool found: {bool(providers.find_codex())}")
         os.environ.setdefault("ANTHROPIC_API_KEY", "selftest-not-a-key")
         try:
             providers.make({"provider": "anthropic", "model": "x"}).list_models()

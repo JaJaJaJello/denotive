@@ -17,6 +17,54 @@ DEFAULT_FONT = "Segoe UI"
 MONO_FONT = "Consolas"
 PAGE_SIZES = {"16:9": (1280, 720), "4:3": (1024, 768), "1:1": (900, 900), "A4 portrait": (794, 1123),
               "Letter portrait": (816, 1056), "Tall note": (900, 1600)}
+# An evidence can hold several pages stacked top to bottom: page k starts at y = k * (h + PAGE_GAP).
+PAGE_GAP = 40.0
+GAP_COLOR = "#cdd1d8"
+
+
+def doc_pages(doc) -> int:
+    return max(1, int(doc.get("pages", 1) or 1))
+
+
+def doc_height(doc) -> float:
+    """Height of the whole evidence: every page plus the gaps between them."""
+    n = doc_pages(doc)
+    return n * float(doc.get("h", 720)) + (n - 1) * PAGE_GAP
+
+
+def doc_aspect(doc) -> float:
+    return doc_height(doc) / float(doc.get("w", 1280))
+
+
+def _y_extent(d):
+    """Top and bottom of an item dict on the page, allowing for rotation."""
+    y = float(d.get("y", 0))
+    if d.get("type") == "line":
+        a, b = float(d.get("y1", 0)), float(d.get("y2", 0))
+        return y + min(a, b), y + max(a, b)
+    w, h = float(d.get("w", 0)), float(d.get("h", 0))
+    t = math.radians(float(d.get("rot", 0) or 0))
+    half = (abs(w * math.sin(t)) + abs(h * math.cos(t))) / 2
+    cy = y + h / 2
+    return cy - half, cy + half
+
+
+def split_pages(doc):
+    """One single-page doc per page, with each item moved onto the page(s) it sits on (for export)."""
+    n = doc_pages(doc)
+    if n == 1:
+        return [doc]
+    h = float(doc.get("h", 720))
+    step = h + PAGE_GAP
+    pages = [dict(doc, pages=1, items=[]) for _ in range(n)]
+    for d in doc.get("items", []):
+        top, bottom = _y_extent(d)
+        hits = [k for k in range(n) if bottom > k * step and top < k * step + h]
+        if not hits:  # parked in a gap: it belongs to the nearest page
+            hits = [min(n - 1, max(0, int(((top + bottom) / 2 + PAGE_GAP / 2) // step)))]
+        for k in hits:
+            pages[k]["items"].append(dict(d, y=float(d.get("y", 0)) - k * step))
+    return pages
 
 
 def short_id():
@@ -77,6 +125,7 @@ class SlideItem(QGraphicsObject):
     def __init__(self, d):
         super().__init__()
         self.uid = d.get("id") or short_id()
+        self.group = d.get("group") or None  # items sharing a group id select and move together
         self.w = float(d.get("w", 200))
         self.h = float(d.get("h", 120))
         self.locked = False
@@ -119,10 +168,13 @@ class SlideItem(QGraphicsObject):
 
     # -- serialisation
     def base(self):
-        return {"id": self.uid, "type": self.TYPE, "x": round(self.x(), 2), "y": round(self.y(), 2),
-                "w": round(self.w, 2), "h": round(self.h, 2), "rot": round(self.rotation(), 3),
-                "opacity": round(self.opacity(), 3), "z": self.zValue(), "locked": self.locked,
-                "hidden": not self.isVisible()}
+        d = {"id": self.uid, "type": self.TYPE, "x": round(self.x(), 2), "y": round(self.y(), 2),
+             "w": round(self.w, 2), "h": round(self.h, 2), "rot": round(self.rotation(), 3),
+             "opacity": round(self.opacity(), 3), "z": self.zValue(), "locked": self.locked,
+             "hidden": not self.isVisible()}
+        if self.group:
+            d["group"] = self.group
+        return d
 
     def to_dict(self):
         return self.base()

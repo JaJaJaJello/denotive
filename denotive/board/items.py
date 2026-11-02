@@ -7,11 +7,12 @@ import math
 from datetime import datetime
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QLinearGradient, QPainter, QPainterPath,
-                           QPainterPathStroker, QPen, QTextLayout, QTextOption)
+from PySide6.QtGui import (QAbstractTextDocumentLayout, QBrush, QColor, QFont, QFontMetricsF, QLinearGradient,
+                           QPainter, QPainterPath, QPainterPathStroker, QPalette, QPen, QTextDocument, QTextLayout,
+                           QTextOption)
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsObject, QGraphicsTextItem, QStyleOptionGraphicsItem
 
-from .. import context, geometry, theme
+from .. import context, geometry, textmarks, theme
 
 PAD = 18.0  # bounding slack for shadows, pins and selection; every decoration is capped to fit inside it
 PIN_MAX = 40.0  # largest pin (scene units) so a zoomed-out pin never paints outside the item
@@ -601,6 +602,9 @@ class InlineText(QGraphicsTextItem):
         opt.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
         self.document().setDefaultTextOption(opt)
         self.setTextInteractionFlags(Qt.TextEditorInteraction)
+        if owner.RICH:
+            textmarks.set_indent(self.document(), font.pixelSize())
+            textmarks.apply(self.document(), owner.spans(), owner.lists())
         self.document().contentsChanged.connect(owner.on_edit_changed)
         self._done = False
 
@@ -616,7 +620,34 @@ class InlineText(QGraphicsTextItem):
                 self._done = True
                 self.owner.finish_edit()
             return
+        action = textmarks.key_action(e)
+        if action:
+            if self.owner.RICH:
+                self.format(action)
+            e.accept()
+            return
         super().keyPressEvent(e)
+
+    def keyReleaseEvent(self, e):
+        super().keyReleaseEvent(e)
+        self.owner.on_cursor_moved()
+
+    def mouseReleaseEvent(self, e):
+        super().mouseReleaseEvent(e)
+        self.owner.on_cursor_moved()
+
+    def format(self, action):
+        """Bold, a list and so on, for the selection or for what's typed next."""
+        c = self.textCursor()
+        if action in textmarks.LIST_STYLE:
+            textmarks.toggle_list(c, action)
+        else:
+            textmarks.toggle(c, action)
+        self.setTextCursor(c)
+        self.owner.on_cursor_moved()
+
+    def active(self):
+        return textmarks.active(self.textCursor())
 
 
 class TextHolder(BoardItem):
@@ -624,16 +655,49 @@ class TextHolder(BoardItem):
     CENTER = False
     PADDING = 10.0
     AUTO_HEIGHT = False
+    RICH = True  # the text can carry formatting (see textmarks)
     editor = None
+    _rich = None
 
     def text(self):
         return self.data.get("text", "")
+
+    def spans(self):
+        return textmarks.spans_of(self.data) if self.RICH else []
+
+    def lists(self):
+        return (self.data.get("lists") or []) if self.RICH else []
+
+    def is_rich(self):
+        return bool(self.spans() or self.lists())
+
+    def _rich_doc(self, width):
+        """Laid-out text with its formatting (cached until the text, font or width changes)."""
+        center = self.CENTER or self.data.get("align") == "center"
+        f = self.text_font()
+        key = (self.text(), repr((self.spans(), self.lists())), f.key(), round(width, 1), center)
+        if self._rich is not None and self._rich[0] == key:
+            return self._rich[1]
+        doc = QTextDocument()
+        doc.setDocumentMargin(0)
+        doc.setDefaultFont(f)
+        textmarks.set_indent(doc, f.pixelSize())
+        opt = QTextOption(Qt.AlignHCenter if center else Qt.AlignLeft)
+        opt.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        doc.setDefaultTextOption(opt)
+        doc.setPlainText(self.text())
+        textmarks.apply(doc, self.spans(), self.lists())
+        doc.setTextWidth(max(10.0, width))
+        self._rich = (key, doc)
+        return doc
 
     def text_font(self):
         f = QFont(self.data.get("font") or theme.UI_FONT)
         f.setPixelSize(int(self.data.get("size", 18)))
         f.setBold(bool(self.data.get("bold", False)))
         f.setItalic(bool(self.data.get("italic", False)))
+        f.setUnderline(bool(self.data.get("underline", False)))
+        f.setStrikeOut(bool(self.data.get("strike", False)))
         return f
 
     def text_color(self):
@@ -657,6 +721,9 @@ class TextHolder(BoardItem):
         return self._text_height(w)
 
     def _text_height(self, w):
+        if self.is_rich() and self.text():
+            doc = self._rich_doc(max(10.0, w - 2 * self.PADDING))
+            return max(self.MIN_H, doc.size().height() + 2 * self.PADDING)
         fm = QFontMetricsF(self.text_font())
         t = self.text() or "Text"
         br = fm.boundingRect(QRectF(0, 0, max(10.0, w - 2 * self.PADDING), 1e6),
@@ -685,6 +752,16 @@ class TextHolder(BoardItem):
             for i in range(min(4, int(r.height() / 14))):
                 p.drawRect(QRectF(r.x(), r.y() + i * 14 + 3, r.width() * (0.9 - 0.15 * (i % 3)), 6))
             return
+        if self.is_rich():
+            doc = self._rich_doc(r.width())
+            y = r.y() + (max(0.0, (r.height() - doc.size().height()) / 2) if self.CENTER else 0.0)
+            ctx = QAbstractTextDocumentLayout.PaintContext()
+            ctx.palette.setColor(QPalette.Text, QColor(self.text_color()))
+            p.save()
+            p.translate(r.x(), y)
+            doc.documentLayout().draw(p, ctx)
+            p.restore()
+            return
         p.setPen(QColor(self.text_color()))
         align = Qt.AlignHCenter if (self.CENTER or self.data.get("align") == "center") else Qt.AlignLeft
         valign = Qt.AlignVCenter if self.CENTER else Qt.AlignTop
@@ -703,6 +780,9 @@ class TextHolder(BoardItem):
         c.select(c.SelectionType.Document)
         self.editor.setTextCursor(c)
         self.update()
+        sc = self.scene()
+        if self.RICH and sc is not None:
+            sc.text_editing.emit(self)
 
     def _place_editor(self):
         if self.editor is None:
@@ -711,6 +791,11 @@ class TextHolder(BoardItem):
         if self.CENTER:
             eh = self.editor.boundingRect().height()
             self.editor.setPos(r.x() - 4, r.y() + max(0.0, (r.height() - eh) / 2))
+
+    def on_cursor_moved(self):
+        sc = self.scene()
+        if sc is not None and self.editor is not None:
+            sc.text_cursor_moved.emit()
 
     def on_edit_changed(self):
         if self.editor is None:
@@ -730,12 +815,15 @@ class TextHolder(BoardItem):
         if ed is None:
             return
         text = ed.toPlainText()
+        spans = textmarks.ranges(ed.document()) if self.RICH else []
+        lists = textmarks.list_lines(ed.document()) if self.RICH else []
         self.editor = None
         ed.setParentItem(None)
         sc = self.scene()
         if sc is not None:
+            sc.text_editing.emit(None)
             sc.removeItem(ed)
-            sc.commit_text(self, text)
+            sc.commit_text(self, text, spans, lists)
         self.update()
 
     def mouseDoubleClickEvent(self, e):
@@ -880,6 +968,7 @@ class ShapeItem(TextHolder):
 class FrameItem(TextHolder):
     """A labelled region. Dragging it carries along everything inside."""
     KIND = "frame"
+    RICH = False
     HAS_PIN = False
     MIN_W, MIN_H = 160.0, 120.0
     PADDING = 14.0
@@ -1037,6 +1126,9 @@ class LineItem(BoardItem):
         if self._resize is not None:
             end = self._resize[0]
             sp = e.scenePos()
+            if e.modifiers() & Qt.ShiftModifier:  # keep it level or plumb with the other end
+                other = self.pos() if end == "b" else self.pos() + self.p2
+                sp = geometry.ortho(other, sp)
             self.prepareGeometryChange()
             if end == "b":
                 self.p2 = sp - self.pos()

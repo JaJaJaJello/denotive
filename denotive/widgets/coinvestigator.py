@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QFrame, QHBoxLayout, QLa
 
 from .. import context, theme
 from ..ai import casefile, prompts
-from ..ai.providers import claude_login, describe, find_claude, role_config
+from ..ai.providers import describe, open_sign_in, role_config, sign_in_label
 from ..ai.runner import Run
 from .common import clear_layout, label, nice_time, push_button, tool_button
 
@@ -98,7 +98,7 @@ class Bubble(QFrame):
         self.set_text(msg.get("text", ""))
         if err:
             if msg.get("login"):
-                b = push_button("Sign in to Claude…", "openfile")
+                b = push_button(sign_in_label(role_config("coinv")), "openfile")
                 b.clicked.connect(self.panel.sign_in)
                 self.footer.addWidget(b)
             s = push_button("AI settings…", "settings")
@@ -503,12 +503,10 @@ class CoInvestigatorPanel(QFrame):
 
     # ------------------------------------------------------------------ actions
     def sign_in(self):
-        exe = find_claude(role_config("coinv").get("exe", ""))
-        if not exe:
-            self.main.toast("Couldn't find the Claude app's command-line tool")
-            return
-        claude_login(exe)
-        self.main.toast("Finish signing in in the window that opened, then ask again")
+        if open_sign_in(role_config("coinv")):
+            self.main.toast("Finish signing in in the window that opened, then ask again")
+        else:
+            self.main.toast("Couldn't find that provider's command-line tool")
 
     def jump(self, handles, handle):
         iid = handles.get(handle)

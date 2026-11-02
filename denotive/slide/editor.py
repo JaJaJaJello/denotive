@@ -5,15 +5,16 @@ from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QColor, QDesktopServices, QFont, QImage, QKeySequence, QPainter, QPen, QShortcut,
-                           QTextBlockFormat, QTextCursor, QTextFormat, QTextListFormat)
+                           QTextBlockFormat, QTextCharFormat, QTextCursor, QTextFormat, QTextListFormat)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog,
                                QFontComboBox, QFrame, QGraphicsView, QHBoxLayout, QLineEdit, QListWidget,
                                QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit, QScrollArea, QSlider, QSpinBox,
                                QSplitter, QToolButton, QVBoxLayout, QWidget)
 
-from .. import context, geometry, media, theme
+from .. import context, geometry, media, textmarks, theme
 from ..widgets.common import ColorButton, hsep, shift_as_ctrl, label, push_button, section_label, tool_button, vsep
-from .items import PAGE_SIZES, SlideImage, SlideItem, SlideLine, SlideShape, SlideStroke, SlideText, TextBearing
+from .items import (PAGE_SIZES, SlideImage, SlideItem, SlideLine, SlideShape, SlideStroke, SlideText, TextBearing,
+                    doc_aspect)
 from .scene import SlideScene
 
 SLIDE_MIME = "application/x-denotive-slide-items"
@@ -66,6 +67,7 @@ class SlideView(QGraphicsView):
     image_dropped = Signal(QImage, QPointF)
     text_dropped = Signal(str, QPointF)
     key_command = Signal(str)
+    page_changed = Signal(int)
 
     def __init__(self, scene):
         super().__init__(scene)
@@ -80,19 +82,42 @@ class SlideView(QGraphicsView):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
         self.fit_mode = True
         self._pan = None
+        self.verticalScrollBar().valueChanged.connect(self._track_page)
+        scene.page_added.connect(lambda k: QTimer.singleShot(0, lambda: self.show_page(k)))
 
     def request_crop(self, item):
         self.crop_requested.emit(item)
 
     def fit(self):
+        """Fits the page in view (with several pages, the one you're looking at)."""
         sc = self.scene()
-        r = sc.page_rect()
+        r = sc.page_rects()[min(sc.current_page, sc.pages - 1)]
         m = max(r.width(), r.height()) * 0.04
         self.fitInView(r.adjusted(-m, -m, m, m), Qt.KeepAspectRatio)
         sc.view_scale = self.transform().m11()
         self.fit_mode = True
+
+    def show_page(self, k):
+        sc = self.scene()
+        sc.current_page = max(0, min(k, sc.pages - 1))
+        if self.fit_mode:
+            self.fit()
+        else:
+            self.centerOn(sc.page_rects()[sc.current_page].center())
+        self._track_page()
+
+    def _track_page(self, *_):
+        sc = self.scene()
+        if sc is None:
+            return
+        c = self.mapToScene(self.viewport().rect().center())
+        k = sc.page_at(c.y())
+        if k != sc.current_page:
+            sc.current_page = k
+        self.page_changed.emit(sc.current_page)
 
     def zoom_by(self, f):
         cur = self.transform().m11()
@@ -124,6 +149,7 @@ class SlideView(QGraphicsView):
             self.viewport().setCursor(Qt.ClosedHandCursor)
             e.accept()
             return
+        self.setFocus(Qt.MouseFocusReason)
         if e.button() == Qt.LeftButton and self.scene().tool == "select":
             e = shift_as_ctrl(e)
         super().mousePressEvent(e)
@@ -136,13 +162,21 @@ class SlideView(QGraphicsView):
             self.verticalScrollBar().setValue(self.verticalScrollBar().value() - int(d.y()))
             return
         sc = self.scene()
-        if sc.tool == "select" and not e.buttons():
-            it, h = sc.handle_at(self.mapToScene(e.position().toPoint()))
-            cur = sc.cursor_for(it, h) if h else None
-            if cur is not None:
-                self.viewport().setCursor(cur)
-            else:
-                self.viewport().unsetCursor()
+        sp = self.mapToScene(e.position().toPoint())
+        over_add = sc.add_page_rect().contains(sp)
+        if over_add != sc.hover_add:
+            sc.hover_add = over_add
+            sc.update(sc.add_page_rect().adjusted(-4, -4, 4, 4))
+        if not e.buttons():
+            if over_add:
+                self.viewport().setCursor(Qt.PointingHandCursor)
+            elif sc.tool == "select":
+                it, h = sc.handle_at(sp)
+                cur = sc.cursor_for(it, h) if h else None
+                if cur is not None:
+                    self.viewport().setCursor(cur)
+                else:
+                    self.viewport().unsetCursor()
         super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e):
@@ -154,18 +188,36 @@ class SlideView(QGraphicsView):
             e = shift_as_ctrl(e)
         super().mouseReleaseEvent(e)
 
+    ARROWS = {Qt.Key_Left: (-1, 0), Qt.Key_Right: (1, 0), Qt.Key_Up: (0, -1), Qt.Key_Down: (0, 1)}
+
     def keyPressEvent(self, e):
         sc = self.scene()
+        action = textmarks.key_action(e)
+        if action:
+            self.key_command.emit(action)
+            e.accept()
+            return
+        if sc.editing is None and e.key() in self.ARROWS and sc.selected():
+            # nudge the selection one pixel (ten with Shift); never scroll the view instead
+            dx, dy = self.ARROWS[e.key()]
+            step = 10 if e.modifiers() & Qt.ShiftModifier else 1
+            sc.nudge(dx * step, dy * step)
+            e.accept()
+            return
         if sc.editing is None and e.modifiers() & Qt.ControlModifier:
             cmds = {Qt.Key_C: "copy", Qt.Key_X: "cut", Qt.Key_V: "paste", Qt.Key_D: "duplicate",
-                    Qt.Key_A: "selectall", Qt.Key_Z: "undo", Qt.Key_Y: "redo"}
+                    Qt.Key_A: "selectall", Qt.Key_Z: "undo", Qt.Key_Y: "redo", Qt.Key_G: "group"}
             if e.key() in cmds:
                 cmd = cmds[e.key()]
-                if e.key() == Qt.Key_Z and e.modifiers() & Qt.ShiftModifier:
-                    cmd = "redo"
+                if e.modifiers() & Qt.ShiftModifier:
+                    cmd = {"undo": "redo", "group": "ungroup"}.get(cmd, cmd)
                 self.key_command.emit(cmd)
                 e.accept()
                 return
+        if sc.editing is None and e.key() in (Qt.Key_PageDown, Qt.Key_PageUp) and sc.pages > 1:
+            self.show_page(sc.current_page + (1 if e.key() == Qt.Key_PageDown else -1))
+            e.accept()
+            return
         super().keyPressEvent(e)
 
     # drag and drop of images / files / text
@@ -475,7 +527,7 @@ class Inspector(QScrollArea):
         self.b_ital.clicked.connect(lambda on: self._char(lambda f: f.setFontItalic(on)))
         self.b_under = tool_button("underline", "Underline (Ctrl+U)", True, 16)
         self.b_under.clicked.connect(lambda on: self._char(lambda f: f.setFontUnderline(on)))
-        self.b_strike = tool_button("strike", "Strikethrough", True, 16)
+        self.b_strike = tool_button("strike", "Strikethrough (Ctrl+Shift+X)", True, 16)
         self.b_strike.clicked.connect(lambda on: self._char(lambda f: f.setFontStrikeOut(on)))
         self.fg = ColorButton("#1d1f24", glyph="fontcolor", tip="Text colour")
         self.fg.colorChanged.connect(lambda c: self._char(lambda f: f.setForeground(QColor(c)), color=c))
@@ -493,13 +545,19 @@ class Inspector(QScrollArea):
             b.clicked.connect(lambda _=False, k=key: self._align_text(k))
             self.al[key] = b
             row.append(b)
-        bl = tool_button("bullets", "Bulleted list", False, 16)
+        bl = tool_button("bullets", "Bulleted list (Ctrl+Shift+8)", False, 16)
         bl.setFocusPolicy(Qt.NoFocus)
         bl.clicked.connect(lambda: self._list(QTextListFormat.ListDisc))
-        nl = tool_button("list", "Numbered list", False, 16)
+        nl = tool_button("list", "Numbered list (Ctrl+Shift+7)", False, 16)
         nl.setFocusPolicy(Qt.NoFocus)
         nl.clicked.connect(lambda: self._list(QTextListFormat.ListDecimal))
-        s.row(*row, vsep(18), bl, nl)
+        self.b_sup = tool_button("superscript", "Superscript (Ctrl+=)", True, 16)
+        self.b_sup.clicked.connect(lambda: self.page.set_script("sup"))
+        self.b_sub = tool_button("subscript", "Subscript (Ctrl+-)", True, 16)
+        self.b_sub.clicked.connect(lambda: self.page.set_script("sub"))
+        for b in (self.b_sup, self.b_sub):
+            b.setFocusPolicy(Qt.NoFocus)
+        s.row(*row, vsep(18), bl, nl, vsep(18), self.b_sup, self.b_sub)
         # ---- fill / border
         s = self.sec_fill = Section("Fill & border")
         self.shape_kind = QComboBox()
@@ -586,7 +644,13 @@ class Inspector(QScrollArea):
         self.lock = tool_button("lock", "Lock position", True, 16)
         self.lock.setFocusPolicy(Qt.NoFocus)
         self.lock.clicked.connect(self._set_lock)
-        s.row(*btns, vsep(18), self.lock)
+        self.b_group = tool_button("group", "Group (Ctrl+G)", False, 18)
+        self.b_group.clicked.connect(lambda: self.page.command("group"))
+        self.b_ungroup = tool_button("ungroup", "Ungroup (Ctrl+Shift+G)", False, 18)
+        self.b_ungroup.clicked.connect(lambda: self.page.command("ungroup"))
+        for b in (self.b_group, self.b_ungroup):
+            b.setFocusPolicy(Qt.NoFocus)
+        s.row(*btns, vsep(18), self.lock, vsep(18), self.b_group, self.b_ungroup)
         abtns = []
         for name, how, tip in (("align_left", "left", "Align left"), ("align_hcenter", "hcenter", "Align centre"),
                                ("align_right", "right", "Align right"), ("align_top", "top", "Align top"),
@@ -895,6 +959,8 @@ class Inspector(QScrollArea):
                 self.b_ital.setChecked(fmt.fontItalic())
                 self.b_under.setChecked(fmt.fontUnderline())
                 self.b_strike.setChecked(fmt.fontStrikeOut())
+                self.b_sup.setChecked(fmt.verticalAlignment() == QTextCharFormat.AlignSuperScript)
+                self.b_sub.setChecked(fmt.verticalAlignment() == QTextCharFormat.AlignSubScript)
                 fg = fmt.foreground().color() if fmt.hasProperty(QTextFormat.ForegroundBrush) else QColor(it.color)
                 self.fg.setColor(fg.name())
                 a = blk.alignment()
@@ -952,6 +1018,8 @@ class Inspector(QScrollArea):
                 self.op.setValue(int(sel[0].opacity() * 100))
             for spn in (self.gx, self.gy, self.gw, self.gh, self.rot):
                 spn.setEnabled(len(sel) == 1)
+            self.b_group.setEnabled(len(sel) >= 2 and sc.selected_group() is None)
+            self.b_ungroup.setEnabled(any(i.group in sc.groups() for i in sel))
         finally:
             self._busy = False
         self.refresh_layers()
@@ -967,10 +1035,11 @@ class Inspector(QScrollArea):
         self.layers.clear()
         icons = {"text": "textbox", "shape": "shape_round", "image": "image", "line": "tool_line",
                  "stroke": "ink"}
+        groups = self.scene.groups()
         for it in reversed(self.scene.sorted_items()):
             li = QListWidgetItem(theme.icon(icons.get(it.TYPE, "doc"), 16, theme.MUTED if it.isVisible() else theme.FAINT),
-                                 it.label() + ("  (hidden)" if not it.isVisible() else "") +
-                                 ("  🔒" if it.locked else ""))
+                                 ("⧉ " if it.group in groups else "") + it.label() +
+                                 ("  (hidden)" if not it.isVisible() else "") + ("  🔒" if it.locked else ""))
             li.setData(Qt.UserRole, it.uid)
             self.layers.addItem(li)
             li.setSelected(it.isSelected())
@@ -1098,11 +1167,26 @@ class EditorPage(QWidget):
             b.clicked.connect(lambda _=False, c=cmd: self.command(c))
             rl.addWidget(b)
         rl.addStretch(1)
+        self.page_prev = tool_button("up", "Previous page (Page Up)")
+        self.page_prev.clicked.connect(lambda: self.view.show_page(self.scene.current_page - 1))
+        self.page_label = label("Page 1 of 1", "Muted")
+        self.page_next = tool_button("down", "Next page (Page Down)")
+        self.page_next.clicked.connect(lambda: self.view.show_page(self.scene.current_page + 1))
+        self.page_add = tool_button("add", "Add a page below this one — more room, shown stacked on the board",
+                                    text="Page")
+        self.page_add.clicked.connect(lambda: self.scene.add_page(self.scene.current_page))
+        self.page_del = tool_button("delete", "Delete this page and everything on it")
+        self.page_del.clicked.connect(lambda: self.delete_page(self.scene.current_page))
+        for b in (self.page_prev, self.page_label, self.page_next, self.page_add, self.page_del):
+            if b is not self.page_label:
+                b.setFocusPolicy(Qt.NoFocus)
+            rl.addWidget(b)
+        rl.addWidget(vsep())
         zo = tool_button("zoomout", "Zoom out (Ctrl+wheel)")
         zo.clicked.connect(lambda: self.view.zoom_by(1 / 1.2))
         zi = tool_button("zoomin", "Zoom in")
         zi.clicked.connect(lambda: self.view.zoom_by(1.2))
-        fit = tool_button("fit", "Fit slide")
+        fit = tool_button("fit", "Fit page")
         fit.clicked.connect(self.view.fit)
         for b in (zo, zi, fit):
             b.setFocusPolicy(Qt.NoFocus)
@@ -1188,10 +1272,13 @@ class EditorPage(QWidget):
         self.view.image_dropped.connect(lambda img, pos: self._add_qimage(img, pos))
         self.view.text_dropped.connect(lambda t, pos: self.scene._create_text(pos, text=t))
         self.view.key_command.connect(self.command)
+        self.view.page_changed.connect(self._page_changed)
+        sc.state_pushed.connect(lambda: self._page_changed(sc.current_page))
         self._sel_timer = QTimer(self)
         self._sel_timer.setSingleShot(True)
         self._sel_timer.setInterval(30)
         self._sel_timer.timeout.connect(self.inspector.refresh)
+        self._page_changed(0)
 
     # ---- open / close
     def open_new(self, board_id, pos, doc=None, title=""):
@@ -1223,8 +1310,22 @@ class EditorPage(QWidget):
         self.ver_label.setText(f"Editing {src} · saving stacks v{nxt} on top")
         return True
 
+    def _page_changed(self, k):
+        n = self.scene.pages
+        self.page_label.setText(f"Page {k + 1} of {n}")
+        for w in (self.page_prev, self.page_label, self.page_next, self.page_del):
+            w.setVisible(n > 1)
+        self.page_prev.setEnabled(k > 0)
+        self.page_next.setEnabled(k < n - 1)
+
+    def delete_page(self, k):
+        if self.scene.delete_page(k):
+            self.view.show_page(min(k, self.scene.pages - 1))
+            self.main.toast(f"Page {k + 1} deleted — Ctrl+Z brings it back")
+
     def _load(self, doc, title):
         self._loading = True
+        self.scene.current_page = 0
         b = context.store.board(self.board_id)
         p = context.store.project(b["project_id"]) if b else None
         self.crumb.setText(f"{p['name'] if p else ''}  ›  {b['name'] if b else ''}")
@@ -1312,10 +1413,10 @@ class EditorPage(QWidget):
         text = sc.plain_text()
         title = self.title.text().strip() or self.auto_title()
         thumb = media.thumb_asset(st, sc.render_image(960))
-        aspect = sc.page_h / sc.page_w
+        aspect = doc_aspect(doc)  # every page, stacked
         created = False
         if self.item_id is None:
-            w = 300.0 if aspect <= 1.05 else 230.0
+            w = 300.0 if sc.page_h / sc.page_w <= 1.05 else 230.0
             h = evidence_card_height(w, aspect)
             row = st.new_item(self.board_id, "evidence", self.drop_pos.x() - w / 2, self.drop_pos.y() - h / 2, w, h,
                               {"aspect": aspect})
@@ -1437,17 +1538,16 @@ class EditorPage(QWidget):
         self._draft_finish()
         self.notes.undo()  # take back the header line
         box = QMessageBox(QMessageBox.Warning, "Couldn't draft notes", msg, QMessageBox.Ok, self)
+        from ..ai.providers import open_sign_in, role_config, sign_in_label
+        cfg = role_config("notes")
         if login:
-            b = box.addButton("Sign in to Claude…", QMessageBox.ActionRole)
+            b = box.addButton(sign_in_label(cfg), QMessageBox.ActionRole)
         else:
             b = box.addButton("AI settings…", QMessageBox.ActionRole)
         box.exec()
         if box.clickedButton() is b:
             if login:
-                from ..ai.providers import claude_login, find_claude
-                exe = find_claude()
-                if exe:
-                    claude_login(exe)
+                open_sign_in(cfg)
             else:
                 self.main.open_ai_settings()
 
@@ -1511,6 +1611,41 @@ class EditorPage(QWidget):
                     it.setSelected(True)
         elif cmd == "delete":
             sc.delete_selected()
+        elif cmd == "group":
+            if sc.group_selected():
+                self.main.toast("Grouped — Ctrl+Shift+G ungroups")
+        elif cmd == "ungroup":
+            sc.ungroup_selected()
+        elif cmd in ("sup", "sub"):
+            self.set_script(cmd)
+        elif cmd in ("b", "i", "u", "s"):
+            getattr(self.inspector, {"b": "b_bold", "i": "b_ital", "u": "b_under", "s": "b_strike"}[cmd]).click()
+        elif cmd in textmarks.LIST_STYLE:
+            self.inspector._list(textmarks.LIST_STYLE[cmd])
+        self.inspector.refresh()
+
+    def set_script(self, kind):
+        """Superscript / subscript the selected text (or the whole of the selected text boxes); again = normal.
+
+        With no text to change, Ctrl+= / Ctrl+- zoom like everywhere else."""
+        targets, editing = self.inspector._text_targets()
+        if not targets:
+            self.view.zoom_by(1.2 if kind == "sup" else 1 / 1.2)
+            return
+        al = textmarks.ALIGN_OF[kind]
+        t = targets[0].text
+        if editing:
+            c = t.textCursor()
+            if c.hasSelection():
+                c = QTextCursor(t.document())
+                c.setPosition(t.textCursor().selectionStart() + 1)
+        else:
+            c = QTextCursor(t.document())
+            c.movePosition(QTextCursor.Start)
+            c.movePosition(QTextCursor.Right)
+        new = QTextCharFormat.AlignNormal if c.charFormat().verticalAlignment() == al else al
+        self.inspector._char(lambda f: f.setVerticalAlignment(new))
+        self.inspector.refresh()
 
     def copy(self):
         sel = sorted([i for i in self.scene.selectedItems() if isinstance(i, SlideItem)], key=lambda i: i.zValue())
@@ -1527,7 +1662,8 @@ class EditorPage(QWidget):
     def paste(self):
         md = QApplication.clipboard().mimeData()
         sc = self.scene
-        center = QPointF(sc.page_w / 2, sc.page_h / 2)
+        center = sc.page_center()
+        top = sc.page_rects()[sc.current_page].topLeft()
         if md.hasFormat(SLIDE_MIME):
             sc.paste_dicts(json.loads(bytes(md.data(SLIDE_MIME)).decode()))
         elif md.hasImage():
@@ -1535,7 +1671,7 @@ class EditorPage(QWidget):
         elif md.hasUrls() and any(u.isLocalFile() for u in md.urls()):
             self._drop_files([u.toLocalFile() for u in md.urls() if u.isLocalFile()], center)
         elif md.hasText() and md.text().strip():
-            sc._create_text(QPointF(sc.page_w * 0.1, sc.page_h * 0.15), text=md.text())
+            sc._create_text(top + QPointF(sc.page_w * 0.1, sc.page_h * 0.15), text=md.text())
 
     def _add_qimage(self, img, pos):
         if img.isNull():
@@ -1560,7 +1696,7 @@ class EditorPage(QWidget):
     def insert_image(self):
         paths, _ = QFileDialog.getOpenFileNames(self, "Insert pictures", "", IMAGE_FILTER)
         if paths:
-            self._drop_files(paths, QPointF(self.scene.page_w / 2, self.scene.page_h / 2))
+            self._drop_files(paths, self.scene.page_center())
 
     def replace_image(self):
         sel = [i for i in self.scene.selectedItems() if isinstance(i, SlideImage)]
@@ -1614,7 +1750,8 @@ class EditorPage(QWidget):
             for i in range(rows))
         html = (f"<table border='1' cellspacing='0' cellpadding='6' width='100%' "
                 f"style='border-collapse:collapse;border-color:#9aa0ad'>{cells}</table>")
-        it = SlideText({"x": sc.page_w * 0.1, "y": sc.page_h * 0.2, "w": sc.page_w * 0.8, "h": 40,
+        top = sc.page_rects()[sc.current_page].topLeft()
+        it = SlideText({"x": top.x() + sc.page_w * 0.1, "y": top.y() + sc.page_h * 0.2, "w": sc.page_w * 0.8, "h": 40,
                         "font": sc.opts["font"], "size": 20, "color": "#1d1f24", "html": html, "fill": "#ffffff",
                         "radius": 4})
         sc.add(it)
@@ -1668,6 +1805,11 @@ class EditorPage(QWidget):
                                    ("backward", "backward", "Send backward"), ("back", "back", "Send to back")):
                 m.addAction(theme.icon(name, 16), txt, lambda h=how: sc.reorder(h))
             m.addSeparator()
+            sel = sc.selected()
+            if len(sel) >= 2 and sc.selected_group() is None:
+                m.addAction(theme.icon("group", 16), "Group\tCtrl+G", lambda: self.command("group"))
+            if any(i.group in sc.groups() for i in sel):
+                m.addAction(theme.icon("ungroup", 16), "Ungroup\tCtrl+Shift+G", lambda: self.command("ungroup"))
             m.addAction(theme.icon("unlock" if item.locked else "lock", 16), "Unlock" if item.locked else "Lock",
                         lambda: (item.set_locked(not item.locked), sc.update(), sc.push_state(),
                                  self.inspector.refresh()))
@@ -1680,4 +1822,9 @@ class EditorPage(QWidget):
             if hidden:
                 m.addAction(theme.icon("view", 16), "Show hidden items",
                             lambda: ([i.setVisible(True) for i in hidden], sc.push_state()))
+            m.addSeparator()
+            k = sc.page_at(sc.ctx_pos.y())
+            m.addAction(theme.icon("add", 16), "Add page below", lambda: sc.add_page(k))
+            if sc.pages > 1:
+                m.addAction(theme.icon("delete", 16), f"Delete page {k + 1}", lambda: self.delete_page(k))
         m.exec(screen_pos)

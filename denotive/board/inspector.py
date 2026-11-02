@@ -317,14 +317,44 @@ class BoardInspector(QScrollArea):
                     it.data["size"] = old
             upd(fn)
         size.valueChanged.connect(set_size)
-        bold = tool_button("bold", "Bold", True, 16)
-        bold.setChecked(bool(first.data.get("bold")))
-        bold.clicked.connect(lambda on: upd(lambda r: r["data"].__setitem__("bold", on)))
+
+        def style(on, action, key):
+            if first.editor is not None:  # typing: just the selected words
+                first.editor.format(action)
+            else:
+                upd(lambda r: r["data"].__setitem__(key, on))
+
+        def set_list(action):
+            if first.editor is not None:
+                first.editor.format(action)
+                return
+
+            def fn(r):
+                lines = range((r["data"].get("text") or "").count("\n") + 1)
+                whole = [[i, action] for i in lines]
+                r["data"]["lists"] = [] if (r["data"].get("lists") or []) == whole else whole
+            upd(fn)
+
+        marks = []
+        for icon, action, key, tip in (("bold", "b", "bold", "Bold"), ("italic", "i", "italic", "Italic"),
+                                       ("underline", "u", "underline", "Underline"),
+                                       ("strike", "s", "strike", "Strikethrough")):
+            b = tool_button(icon, tip, True, 16)
+            b.setFocusPolicy(Qt.NoFocus)  # a click must not end the typing
+            b.setChecked(bool(first.data.get(key)))
+            b.clicked.connect(lambda on, a=action, k=key: style(on, a, k))
+            marks.append(b)
+        for icon, action, tip in (("bullets", "bullet", "Bulleted list"), ("list", "number", "Numbered list")):
+            b = tool_button(icon, tip, False, 16)
+            b.setFocusPolicy(Qt.NoFocus)
+            b.clicked.connect(lambda _=False, a=action: set_list(a))
+            marks.append(b)
         center = tool_button("aligncenter", "Centre text", True, 16)
         center.setChecked(first.data.get("align") == "center" or first.KIND == "shape")
         center.setEnabled(first.KIND != "shape")
         center.clicked.connect(lambda on: upd(lambda r: r["data"].__setitem__("align", "center" if on else "left")))
-        self._row("Size", size, bold, center)
+        self._row("Size", size, center)
+        self._row(*marks)
         self._add(label("Text colour", "Muted"))
         tc = SwatchRow(TEXT_COLORS, 18)
         tc.set_current(first.data.get("tcolor") or first.text_color())

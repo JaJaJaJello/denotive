@@ -49,12 +49,12 @@ class SlidePreview(QGraphicsView):
     def drawBackground(self, p, rect):
         p.fillRect(rect, self._bg)
         if self.sc is not None:
-            page = self.sc.page_rect()
             p.setPen(Qt.NoPen)
-            for i, a in ((2, 50), (6, 26), (12, 12)):
-                p.setBrush(QColor(0, 0, 0, a))
-                p.drawRoundedRect(page.adjusted(-i / 2, -i / 4, i / 2, i), 4, 4)
-            p.fillRect(page, QColor(self.sc.bg))
+            for page in self.sc.page_rects():
+                for i, a in ((2, 50), (6, 26), (12, 12)):
+                    p.setBrush(QColor(0, 0, 0, a))
+                    p.drawRoundedRect(page.adjusted(-i / 2, -i / 4, i / 2, i), 4, 4)
+                p.fillRect(page, QColor(self.sc.bg))
 
     def drawForeground(self, p, rect):
         pass

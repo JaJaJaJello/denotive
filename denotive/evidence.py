@@ -43,8 +43,9 @@ def new_evidence(board_id, center: QPointF, title, doc):
     st = context.store
     img, text = render_doc_thumb(doc)
     thumb = media.thumb_asset(st, img)
-    aspect = doc.get("h", 720) / doc.get("w", 1280)
-    w = 300.0 if aspect <= 1.05 else 230.0
+    from .slide.items import doc_aspect
+    aspect = doc_aspect(doc)
+    w = 300.0 if doc.get("h", 720) / doc.get("w", 1280) <= 1.05 else 230.0
     h = evidence_card_height(w, aspect)
     row = st.new_item(board_id, "evidence", center.x() - w / 2, center.y() - h / 2, w, h, {"aspect": aspect})
     with st.tx():

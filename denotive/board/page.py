@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame, QGraphicsRectI
 
 from .. import context, evidence, geometry, theme
 from ..widgets.common import label, push_button, tool_button, vsep
+from .formatbar import FormatBar
 from .inspector import BoardInspector
 from .items import BoardItem, BoardLinkCard, EvidenceCard, FileCard, FrameItem, LineItem, TextHolder
 from .scene import BOARD_MIME, BOARDREF_MIME, BoardScene
@@ -190,6 +191,7 @@ class BoardPage(QWidget):
             zl.addWidget(w)
         self.view.zoom_changed.connect(lambda z: self.zoom_lbl.setText(f"{round(z * 100)}%"))
         self.minimap = Minimap(self.view, self.canvas)
+        self.format_bar = FormatBar(self.view)
         from ..settings import settings
         show_mm = bool(settings.get("show_minimap", True))
         self.minimap.setVisible(show_mm)
@@ -255,6 +257,7 @@ class BoardPage(QWidget):
         self.save_view_state()
         old = self.scene
         self.board = b
+        self.format_bar.attach(None)
         self.scene = BoardScene(b)
         self.view.setScene(self.scene)
         if old is not None:
@@ -266,6 +269,8 @@ class BoardPage(QWidget):
         sc = self.scene
         sc.selectionChanged.connect(self.inspector.refresh)
         sc.label_edit.connect(self.edit_label)
+        sc.text_editing.connect(self.format_bar.attach)
+        sc.text_cursor_moved.connect(self.format_bar.refresh)
         sc.open_item.connect(self._open_item)
         sc.undo_changed.connect(self._update_undo)
         sc.changed.connect(self._scene_changed)

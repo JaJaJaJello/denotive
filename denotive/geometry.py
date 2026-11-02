@@ -100,6 +100,13 @@ def shape_text_rect(kind: str, r: QRectF) -> QRectF:
     return r.adjusted(10, 8, -10, -8)
 
 
+def ortho(a: QPointF, b: QPointF) -> QPointF:
+    """b moved onto the horizontal or vertical line through a, whichever is nearer (Shift while drawing)."""
+    if abs(b.x() - a.x()) >= abs(b.y() - a.y()):
+        return QPointF(b.x(), a.y())
+    return QPointF(a.x(), b.y())
+
+
 def arrow_head(tip: QPointF, angle_rad: float, size: float) -> QPolygonF:
     """Triangle whose tip is at `tip`, pointing along angle (radians, y down)."""
     back = angle_rad + math.pi

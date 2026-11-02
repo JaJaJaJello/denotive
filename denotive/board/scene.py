@@ -10,7 +10,7 @@ from collections import defaultdict
 from PySide6.QtCore import QRectF, Qt, QTimer, Signal
 from PySide6.QtWidgets import QGraphicsScene
 
-from .. import context
+from .. import context, textmarks
 from ..store import new_id
 from .items import KIND_CLASSES, BoardItem, FrameItem, LineItem, TextHolder
 from .strings import STRING_Z_BEHIND, STRING_Z_TOP, StringItem, TempString
@@ -25,6 +25,8 @@ class BoardScene(QGraphicsScene):
     undo_changed = Signal()
     label_edit = Signal(object)
     open_item = Signal(object)
+    text_editing = Signal(object)  # the item being typed in, or None
+    text_cursor_moved = Signal()
 
     def __init__(self, board):
         super().__init__()
@@ -252,10 +254,12 @@ class BoardScene(QGraphicsScene):
         if after:
             self.commit(before, after, "Edit string")
 
-    def commit_text(self, item, text):
+    def commit_text(self, item, text, spans=None, lists=None):
         key = "title" if item.KIND == "frame" else "text"
         old = dict(item.row, data=dict(item.data))
-        if (old["data"].get(key) or "") == text:
+        spans, lists = [list(r) for r in spans or []], [list(r) for r in lists or []]
+        if (old["data"].get(key) or "") == text and textmarks.spans_of(old["data"]) == spans and \
+                (old["data"].get("lists") or []) == lists:
             if item.KIND == "note" and getattr(item, "fresh", False) and not text.strip():
                 self._discard_fresh(item)
             else:
@@ -266,6 +270,12 @@ class BoardScene(QGraphicsScene):
             return
         new = item.current_row()
         new["data"] = dict(new["data"], **{key: text})
+        new["data"].pop("scripts", None)
+        for k, v in (("spans", spans), ("lists", lists)):
+            if v:
+                new["data"][k] = v
+            else:
+                new["data"].pop(k, None)
         new["updated"] = time.time()
         if isinstance(item, TextHolder) and item.AUTO_HEIGHT:
             new["h"] = item._text_height(item.w) if text else item.MIN_H

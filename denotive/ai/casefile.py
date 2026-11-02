@@ -7,7 +7,7 @@ import base64
 import re
 from datetime import datetime
 
-from .. import context
+from .. import context, textmarks
 
 KIND_PREFIX = {"evidence": "E", "file": "F", "note": "N", "sticky": "N", "shape": "N", "boardlink": "B"}
 ARROWS = {"none": "—", "fwd": "→", "back": "←", "both": "↔"}
@@ -107,6 +107,12 @@ def _board_section(cf, board, items, conns, caps, only=None, heading="#"):
             doc = v["doc"] or {}
             notes_text = (doc.get("notes") or "").strip()
             body = (v.get("text") or "").strip()
+            if any(textmarks.has_marks(d.get("html")) for d in doc.get("items", [])):
+                # write formatting out so 10⁻³ doesn't read as "10-3", and crossed-out text doesn't read as a claim
+                body = "\n".join(t for t in (textmarks.html_text(d.get("html")) for d in
+                                             sorted(doc.get("items", []), key=lambda d: d.get("z", 0))
+                                             if d.get("html") or d.get("plain")) if t.strip()) + \
+                    ("\n" + notes_text if notes_text else "")
             if notes_text and body.endswith(notes_text):
                 body = body[: -len(notes_text)].strip()
             line = f"\n{heading}## {cf.by_item[it['id']]} · {v['title'] or it.get('title') or 'Untitled'}"
@@ -144,7 +150,8 @@ def _board_section(cf, board, items, conns, caps, only=None, heading="#"):
         for it in notes:
             kind = {"sticky": "sticky note", "shape": "labelled shape", "note": "text"}[it["kind"]]
             who = " (written by the Co-Investigator)" if it["data"].get("author") == "coinv" else ""
-            text = " / ".join(ln.strip() for ln in _clip(it["data"].get("text", ""), notes_cap).splitlines() if ln.strip())
+            raw = textmarks.item_text(it["data"])
+            text = " / ".join(ln.strip() for ln in _clip(raw, notes_cap).splitlines() if ln.strip())
             out.append(f"- {cf.by_item[it['id']]} ({kind}{who}): {text}")
     if links:
         out.append(f"\n{heading}# Linked boards")

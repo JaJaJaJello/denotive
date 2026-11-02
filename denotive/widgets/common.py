@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta
 
 from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen
 from PySide6.QtWidgets import (QColorDialog, QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QLabel,
                                QLayout, QPushButton, QSizePolicy, QToolButton, QVBoxLayout, QWidget)
 
@@ -193,9 +193,16 @@ class ColorButton(QToolButton):
     def _open(self):
         pop = SwatchPopup(self.colors, self.allow_none, self._color, self.window())
         pop.picked.connect(lambda c: self.setColor(c, emit=True))
+        pop.ensurePolished()
         pop.adjustSize()
-        g = self.mapToGlobal(QPoint(0, self.height() + 4))
-        pop.move(g)
+        # keep every swatch on screen: slide back from the right edge, open upward if there's no room below
+        top = self.mapToGlobal(QPoint(0, 0))
+        area = (QGuiApplication.screenAt(top) or self.screen()).availableGeometry()
+        y = top.y() + self.height() + 4
+        if y + pop.height() > area.bottom() + 1:
+            y = top.y() - pop.height() - 4
+        x = min(top.x(), area.right() + 1 - pop.width())
+        pop.move(max(area.left(), x), max(area.top(), y))
         pop.show()
 
     def paintEvent(self, e):

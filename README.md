@@ -2,6 +2,8 @@
 
 An evidence-board notebook: **projects → boards → evidence**, tied together with red string.
 
+***Very much an entirely vibe-coded program. I had no direct involvement in the code writing for this besides the original prompt. Even the icon is AI generated through claude Opus 5.5*** I had an idea for a note taking app that i would want that may or may not be a good idea. My style of note-taking is very sporadic, and traditional note taking apps like onenote end up doing more harm than good. This gives me the ability to collate and link sporadic ideas more easily, while also having a built-in history retaining feature for scripts if they are drag and dropped into the evidence board so you know exactly what version corresponds to what data. 
+
 **Run:** `dist\DeNotive\DeNotive.exe` (keep the `_internal` folder next to it).
 **Rebuild:** `build.bat` · **Run from source:** `.venv\Scripts\python.exe run.py`
 
@@ -22,6 +24,16 @@ Change or back up the library from the ⚙ button in the sidebar.
 - **Ctrl+V** pastes a screenshot as new evidence, text as a sticky note, or copied cards.
 - Tools: **V** select · **H** pan · **S** string · **T** text · **N** sticky · **R** shape · **L** arrow ·
   **F** frame (dragging a frame carries everything inside it).
+- **Formatting text** in a note, sticky or shape: double-click to type and a small toolbar appears above it. Select
+  some words, then use it or the keys: **Ctrl+B** bold, **Ctrl+I** italic, **Ctrl+U** underline, **Ctrl+Shift+X**
+  strikethrough, **Ctrl+Shift+8** bulleted list, **Ctrl+Shift+7** numbered list. Press again to turn it off. With
+  nothing selected it applies to what you type next. Enter continues a list; Enter on an empty line ends it. When
+  you're not typing, the same buttons in the side panel format the whole note.
+- **Superscript / subscript** while typing in a note, sticky or shape: **Ctrl+=** raises the selected text (10⁻³),
+  **Ctrl+-** lowers it (H₂O); press again to set it back. With nothing selected it applies to what you type next.
+  When you're not typing, Ctrl+= / Ctrl+- zoom as before.
+- Hold **Shift** while drawing an arrow/line (or dragging one of its ends) to keep it perfectly straight:
+  across (0° / 180°) or up and down (90° / 270°), whichever is nearer.
 - **Select several things** with Shift-click or Ctrl-click (click again to drop one), or drag a box around them.
   Every selected item gets its own outline, so you can see exactly what you've picked; move, align, restyle or
   delete them together.
@@ -44,6 +56,11 @@ Projects are links of boards; boards are links of evidence.
 Nothing is sent anywhere until you ask. Set it up in **Settings → AI settings…**, choosing a model separately for
 the Co-Investigator and for note drafting:
 - **Claude via the Claude desktop app** — uses your normal Claude sign-in, no API key (tools switched off).
+- **ChatGPT via the Codex command-line tool** — uses your ChatGPT plan, no API key. Install it once from PowerShell
+  (`irm https://chatgpt.com/codex/install.ps1 | iex`), then press **Sign in with ChatGPT…** in AI settings. It runs
+  read-only with its command tool, web search and your personal Codex config switched off. API keys in your
+  environment aren't passed to it, and AI settings warns you if Codex itself is signed in with a key. Answers appear
+  when they're finished rather than word by word.
 - **Anthropic, OpenAI or Google Gemini API keys** — keys are stored encrypted for your Windows account.
 - **Ollama** — local models; nothing leaves the PC. Vision models (llama3.2-vision, llava, gemma) can see slides.
 - **Any OpenAI-compatible server** (LM Studio, OpenRouter, Groq…).
@@ -53,8 +70,9 @@ the Co-Investigator and for note drafting:
 Picking a model: type one, or press **List models** to open a list of the models that provider offers (installed
 ones, for Ollama) and pick one. A short guide under the box says which is which — for Claude: **haiku** is the
 smallest and fastest (great for notes), **sonnet** is balanced, **opus** is the most capable (best for the
-Co-Investigator, but uses more of your plan's limits). **Test** sends a tiny request to check it works; for Claude,
-**Sign in to Claude…** opens the sign-in if the app isn't logged in. The model chip at the top of the
+Co-Investigator, but uses more of your plan's limits); for Codex, **default** lets Codex choose for your plan.
+**Test** sends a tiny request to check it works; **Sign in to Claude…** / **Sign in with ChatGPT…** opens the
+sign-in if you aren't logged in. The model chip at the top of the
 Co-Investigator panel shows what's in use — click it to change it.
 
 Using it:
@@ -82,6 +100,27 @@ layers, lock, align/distribute, smart guides, rotate, opacity, shadows and sever
 **Double-click** an empty spot on the page to drop a text box there and start typing. Shift-click or Ctrl-click
 selects several things at once, each with its own outline.
 The notes pane under the slide is searchable and is exported as speaker notes.
+
+- **Smart guides**, like PowerPoint: drag anything (shapes, pictures, text, lines and arrows, or a whole
+  selection) and its edges and centre snap to the edges and centres of everything else on the slide, however far
+  away (move a line until its end lines up with the lines below it), and to the page edges and middle. Pink
+  guide lines show what it's lined up with. Resizing, dragging a line's end and drawing new shapes and lines
+  snap the same way. Hold **Alt** to move freely without snapping.
+- **Arrow keys** move the selection 1 pixel (**Shift**+arrow: 10).
+- **Formatting keys**: Ctrl+B, Ctrl+I, Ctrl+U, **Ctrl+Shift+X** strikethrough, **Ctrl+Shift+8** bullets,
+  **Ctrl+Shift+7** numbers, the same as on the board.
+- **Superscript / subscript**: **Ctrl+=** raises and **Ctrl+-** lowers the selected text (or, with a text box
+  selected but not being edited, all of it); press again for normal. The **x²** / **x₂** buttons in the Text panel
+  do the same. They carry through to PDF and PowerPoint, and the Co-Investigator reads them as 10⁻³, H₂O, x^(n).
+  With no text selected, Ctrl+= / Ctrl+- zoom the slide.
+- **Group**: select several things and press **Ctrl+G** (or right-click → Group). Clicking any member selects the
+  whole group, which moves, aligns and resizes as one (drag its handles to scale everything in it).
+  **Ctrl+Shift+G** ungroups. Grouped items show ⧉ in the Layers list.
+- **Pages**: need more room? Click **+ Add page** under the page (or **Page** in the toolbar, or right-click →
+  *Add page below*). Pages stack top to bottom with a small gap; scroll between them, or use the arrows /
+  Page Up / Page Down. Things snap to every page's edges. Right-click a page → *Delete page*, or the bin next to
+  the page counter (Ctrl+Z brings it back). On the board the evidence card shows all its pages stacked.
+
 Shortcuts: Ctrl+S save as new version, Ctrl+Shift+S update the current version, Esc back to the board.
 
 ## Finding things
@@ -92,8 +131,8 @@ Shortcuts: Ctrl+S save as new version, Ctrl+Shift+S update the current version, 
   project or board, sorted by created or updated, filtered to the last day/week/month.
 
 ## Exporting
-Board **Export** menu (or right-click a board/project in the sidebar): every evidence card becomes one slide,
-optionally after an overview page of the whole board.
+Board **Export** menu (or right-click a board/project in the sidebar): every evidence card becomes one slide
+(an evidence with several pages becomes one slide per page), optionally after an overview page of the whole board.
 - **PDF** — vector, text stays selectable.
 - **PowerPoint** — editable text boxes, pictures (with crops), shapes, arrows and ink; notes and string
   connections go into the speaker notes. Or choose "Pictures" for an exact-look deck.

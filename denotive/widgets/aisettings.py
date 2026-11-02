@@ -2,15 +2,15 @@
 import threading
 import time
 
-from PySide6.QtCore import QObject, QUrl, Signal
+from PySide6.QtCore import QObject, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout, QLineEdit, QScrollArea,
                                QVBoxLayout, QWidget)
 
 from .. import theme
 from ..ai import keys, prompts
-from ..ai.providers import (CHATBOT_SITES, DEFAULT_URLS, NEEDS_KEY, PROVIDERS, SUGGESTED, AIError, claude_login,
-                            find_claude, make)
+from ..ai.providers import (CHATBOT_SITES, DEFAULT_URLS, NEEDS_KEY, PROVIDERS, SUGGESTED, AIError, codex_status,
+                            find_claude, find_codex, make, open_sign_in, sign_in_label)
 from ..ai.runner import Run
 from ..settings import settings
 from .common import hsep, label, push_button, section_label
@@ -20,6 +20,8 @@ KEY_PAGES = {"anthropic": "https://console.anthropic.com/settings/keys",
 MODEL_GUIDES = {
     "claude_app": "haiku — smallest and fastest, great for notes  ·  sonnet — balanced  ·  opus — most capable, best "
                   "for the Co-Investigator (uses more of your plan's limits). You can also type a full model name.",
+    "codex": "default lets Codex pick for your plan (recommended). Press List models to see what your sign-in can "
+             "use. Model names change often: if one is refused, go back to default.",
     "anthropic": "claude-haiku-5-5 — smallest, fastest, cheapest  ·  claude-sonnet-5-5 — balanced  ·  "
                  "claude-opus-5-5 — most capable. Press List models for everything your key can use.",
     "openai": "Press List models to see every model your key can use, then pick one from the box.",
@@ -28,11 +30,16 @@ MODEL_GUIDES = {
               "slide images; small models (3–8B) are quick but less sharp.",
     "compatible": "Press List models to ask the server what it offers.",
 }
+CODEX_INSTALL = ("Codex isn't installed yet. Open PowerShell, run this line, then reopen this window:\n"
+                 "irm https://chatgpt.com/codex/install.ps1 | iex")
 HINTS = {
     "none": "The Co-Investigator is off. You can still copy a board's case file from its ⋯ menu.",
     "claude_app": "Uses the Claude desktop app you already have — your normal Claude plan, no API key. "
                   "Sign in once with the button below. Tools are switched off: Claude only sees what DeNotive "
                   "sends and can't touch your files.",
+    "codex": "Uses the Codex command-line tool with your ChatGPT plan, no API key. It runs read-only with its "
+             "command tool and web search switched off, so it reads what DeNotive sends and writes a reply. "
+             "Answers appear when they're finished, not word by word.",
     "anthropic": "Pay-as-you-go through the Anthropic API. Needs an API key from the Anthropic Console.",
     "openai": "ChatGPT's models through the OpenAI API. Needs an API key (separate from a ChatGPT Plus plan).",
     "gemini": "Google's Gemini models. A free API key is available from Google AI Studio.",
@@ -111,8 +118,9 @@ class RoleBox(QFrame):
         self.site.setCurrentIndex(max(0, self.site.findData(cfg.get("site", "https://claude.ai/new"))))
         self.site_row = self._row("Open", self.site)
         v.addLayout(self.site_row)
-        self.claude_status = label("", "Muted", wrap=True)
-        v.addWidget(self.claude_status)
+        self.tool_status = label("", "Muted", wrap=True)
+        self.tool_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        v.addWidget(self.tool_status)
         self.sign_in = push_button("Sign in to Claude…", "openfile")
         self.sign_in.clicked.connect(self._sign_in)
         self.images = QCheckBox("Send slide images too (for models that can see pictures)")
@@ -167,13 +175,25 @@ class RoleBox(QFrame):
         self._show_row(self.site_row, k == "manual")
         self.images.setVisible(has_model)
         self.test.setVisible(has_model)
-        self.sign_in.setVisible(k == "claude_app")
-        self.claude_status.setVisible(k == "claude_app")
+        tool = k in ("claude_app", "codex")
+        self.sign_in.setVisible(tool)
+        self.sign_in.setText(sign_in_label({"provider": k}))
+        self.tool_status.setVisible(tool)
         if k == "claude_app":
             exe = find_claude()
-            self.claude_status.setText(f"Found Claude's command-line tool:\n{exe}" if exe else
-                                       "Couldn't find Claude's command-line tool. Install or update the Claude "
-                                       "desktop app, then reopen this window.")
+            self.tool_status.setText(f"Found Claude's command-line tool:\n{exe}" if exe else
+                                     "Couldn't find Claude's command-line tool. Install or update the Claude "
+                                     "desktop app, then reopen this window.")
+        elif k == "codex":
+            exe = find_codex()
+            self.sign_in.setEnabled(bool(exe))
+            self.tool_status.setText(f"Found Codex:\n{exe}" if exe else CODEX_INSTALL)
+            if exe:
+                a = _Async(self)
+                a.done.connect(lambda s: self._codex_signed_in(exe, s))
+                a.go(lambda: codex_status(exe))
+        if k != "codex":
+            self.sign_in.setEnabled(True)
         self.key.setText(keys.get_key(k) if k in NEEDS_KEY or k == "compatible" else "")
         cur = self.model.currentText() or self._model_cfg
         self.model.clear()
@@ -181,6 +201,19 @@ class RoleBox(QFrame):
         if cur and self._model_cfg and k == self._kind_loaded():
             self.model.setCurrentText(self._model_cfg)
         self.result.setText("")
+
+    def _codex_signed_in(self, exe, status):
+        if self.kind() != "codex":
+            return
+        s = status.lower()
+        if "chatgpt" in s:
+            state = "Signed in with ChatGPT."
+        elif "api key" in s:
+            state = "⚠ Codex is signed in with an API key, so it would bill that key. Use the button below to " \
+                    "sign in with ChatGPT instead."
+        else:
+            state = "Not signed in yet: use the button below."
+        self.tool_status.setText(f"Found Codex:\n{exe}\n{state}")
 
     def _kind_loaded(self):
         return (settings.get("ai") or {}).get(self.role, {}).get("provider")
@@ -230,9 +263,7 @@ class RoleBox(QFrame):
         r.start()
 
     def _sign_in(self):
-        exe = find_claude()
-        if exe:
-            claude_login(exe)
+        if open_sign_in({"provider": self.kind()}):
             self.result.setText("Finish signing in in the window that opened, then press Test.")
 
 

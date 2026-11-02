@@ -9,7 +9,7 @@ from datetime import datetime
 
 from PySide6.QtCore import QMarginsF, QRectF, QSizeF, Qt
 from PySide6.QtGui import (QBrush, QColor, QFont, QImage, QPageLayout, QPageSize, QPainter, QPdfWriter,
-                           QTextDocument, QTextFormat, QTextListFormat)
+                           QTextCharFormat, QTextDocument, QTextFormat, QTextListFormat)
 
 from . import context, media, theme
 from .board.view import BG_COLORS, cork_tile
@@ -62,17 +62,23 @@ def board_pages(board_id, order="position", only_ids=None):
                 name = other.get("title") or other["data"].get("text") or other["data"].get("title") or other["kind"]
             name = (name.splitlines() or [""])[0][:80]
             links.setdefault(me["id"], []).append(f"{arrow} {name}" + (f"  “{c['label']}”" if c.get("label") else ""))
+    from .slide.items import split_pages
     pages = []
     for r in ev:
         v = st.current_version(r["id"])
         if v is None:
             continue
-        pages.append({"item": r, "version": v, "doc": v["doc"], "title": v["title"] or r.get("title") or "",
-                      "links": links.get(r["id"], [])})
+        parts = split_pages(v["doc"])
+        for k, doc in enumerate(parts):
+            pages.append({"item": r, "version": v, "doc": doc, "title": v["title"] or r.get("title") or "",
+                          "links": links.get(r["id"], []), "part": (k, len(parts))})
     return pages
 
 
 def page_notes(pg):
+    k, n = pg.get("part", (0, 1))
+    if k:
+        return f"Page {k + 1} of {n} of “{pg['title'] or 'Untitled evidence'}” — notes are on its first page."
     parts = []
     notes = pg["doc"].get("notes", "").strip()
     if notes:
@@ -469,6 +475,10 @@ class _PptxBuilder:
                     col = cf.foreground().color() if cf.hasProperty(QTextFormat.ForegroundBrush) \
                         else QColor(default_color)
                     font.color.rgb = self.rgb(col.name())
+                    va = cf.verticalAlignment()
+                    if va in (QTextCharFormat.AlignSuperScript, QTextCharFormat.AlignSubScript):
+                        run._r.get_or_add_rPr().set(
+                            "baseline", "30000" if va == QTextCharFormat.AlignSuperScript else "-25000")
                 it += 1
             if first_run and prefix:
                 run = p.add_run()

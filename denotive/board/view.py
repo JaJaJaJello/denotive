@@ -215,7 +215,10 @@ class BoardView(QGraphicsView):
             e.accept()
             return
         if self._create is not None:
-            self._create["cur"] = self.mapToScene(pos.toPoint())
+            c = self._create
+            c["cur"] = self.mapToScene(pos.toPoint())
+            if c["tool"] == "line" and e.modifiers() & Qt.ShiftModifier:
+                c["cur"] = geometry.ortho(c["start"], c["cur"])  # straight across or straight down
             self.viewport().update()
             e.accept()
             return
@@ -237,6 +240,8 @@ class BoardView(QGraphicsView):
             return
         if self._create is not None and e.button() == Qt.LeftButton:
             c, self._create = self._create, None
+            if c["tool"] == "line" and e.modifiers() & Qt.ShiftModifier:
+                c["cur"] = geometry.ortho(c["start"], self.mapToScene(e.position().toPoint()))
             self.viewport().update()
             self.create_requested.emit(c["tool"], c["start"], c["cur"])
             e.accept()
