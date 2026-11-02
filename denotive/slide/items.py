@@ -64,6 +64,14 @@ def split_pages(doc):
             hits = [min(n - 1, max(0, int(((top + bottom) / 2 + PAGE_GAP / 2) // step)))]
         for k in hits:
             pages[k]["items"].append(dict(d, y=float(d.get("y", 0)) - k * step))
+    by_id = {d.get("id"): d for d in doc.get("items", [])}
+    for k, page in enumerate(pages):
+        ids = {d.get("id") for d in page["items"]}
+        for d in list(page["items"]):
+            src = by_id.get(d.get("src")) if d.get("type") == "zoom" else None
+            if src is not None and src.get("id") not in ids:  # magnifies a picture on another page
+                page["items"].append(dict(src, y=float(src.get("y", 0)) - k * step, hidden=True))
+                ids.add(src.get("id"))
     return pages
 
 
@@ -158,6 +166,13 @@ class SlideItem(QGraphicsObject):
         self.layout_children()
         self.setTransformOriginPoint(self.w / 2, self.h / 2)
         self.update()
+        self._moved()
+
+    def _moved(self):
+        """Tells the slide this item's box changed, so zoom callouts and stuck line ends can follow."""
+        sc = self.scene()
+        if sc is not None and hasattr(sc, "item_geometry_changed"):
+            sc.item_geometry_changed(self)
 
     def layout_children(self):
         pass
@@ -190,6 +205,8 @@ class SlideItem(QGraphicsObject):
             sc = self.scene()
             if sc is not None and hasattr(sc, "snap_position"):
                 return sc.snap_position(self, value)
+        elif change in (QGraphicsItem.ItemPositionHasChanged, QGraphicsItem.ItemRotationHasChanged):
+            self._moved()
         return super().itemChange(change, value)
 
     def paint_shadow(self, p, path):
@@ -299,6 +316,7 @@ class SlideText(TextBearing):
             self.prepareGeometryChange()
             self.h = new_h
             self.setTransformOriginPoint(self.w / 2, self.h / 2)
+            self._moved()
 
     def paint(self, p, opt, widget=None):
         r = self.rect()
@@ -477,8 +495,14 @@ class SlideLine(SlideItem):
         self.dash = d.get("dash", "solid")
         self.a1 = bool(d.get("a1", False))
         self.a2 = bool(d.get("a2", False))
+        # an end stuck to an object: {"id": its uid, "u": x, "v": y as fractions of its box}
+        self.g1, self.g2 = d.get("g1") or None, d.get("g2") or None
+        self.stick = bool(d.get("stick", True))
         self.setRotation(0)
         self._sync_box()
+
+    def glued_to(self, uid):
+        return any(g and g.get("id") == uid for g in (self.g1, self.g2))
 
     def label(self):
         return "Arrow" if (self.a1 or self.a2) else "Line"
@@ -539,7 +563,8 @@ class SlideLine(SlideItem):
     def to_dict(self):
         d = self.base()
         d.update(rot=0, x1=round(self.p1.x(), 2), y1=round(self.p1.y(), 2), x2=round(self.p2.x(), 2),
-                 y2=round(self.p2.y(), 2), stroke=self.stroke, sw=self.sw, dash=self.dash, a1=self.a1, a2=self.a2)
+                 y2=round(self.p2.y(), 2), stroke=self.stroke, sw=self.sw, dash=self.dash, a1=self.a1, a2=self.a2,
+                 g1=self.g1, g2=self.g2, stick=self.stick)
         return d
 
 
@@ -600,7 +625,136 @@ class SlideStroke(SlideItem):
         return d
 
 
-ITEM_TYPES = {"text": SlideText, "shape": SlideShape, "image": SlideImage, "line": SlideLine, "stroke": SlideStroke}
+class SlideZoom(SlideItem):
+    """A magnified view of part of a picture: an outline on the picture, the enlarged copy, and lines between.
+
+    area = [u0, v0, u1, v1] is the magnified part as fractions of the picture's box, so it stays on the same
+    spot of the picture when the picture is moved, resized or turned. The enlarged copy keeps its proportions."""
+    TYPE = "zoom"
+    KEEP_ASPECT = True
+
+    def __init__(self, d):
+        super().__init__(d)
+        self.setRotation(0)
+        self.src = d.get("src")
+        self.area = [float(v) for v in (d.get("area") or (0.4, 0.4, 0.6, 0.6))]
+        self.shape_kind = d.get("shape", "rect")
+        self.stroke = d.get("stroke") or "#e5484d"
+        self.sw = float(d.get("sw", 3))
+        self.lines = bool(d.get("lines", True))
+        self._src = None
+
+    def label(self):
+        return "Zoom-in"
+
+    def source(self):
+        sc = self.scene()
+        if sc is None:
+            return None
+        s = self._src
+        if s is None or s.scene() is not sc or s.uid != self.src:
+            s = next((i for i in sc.items() if isinstance(i, SlideImage) and i.uid == self.src), None)
+            self._src = s
+        return s
+
+    def area_local(self, img):
+        u0, v0, u1, v1 = self.area
+        return QRectF(u0 * img.w, v0 * img.h, (u1 - u0) * img.w, (v1 - v0) * img.h)
+
+    @staticmethod
+    def _radius(r):
+        return min(r.width(), r.height()) * 0.12
+
+    def lens_path(self, img=None):
+        """The outline on the picture, in this item's coordinates."""
+        img = img or self.source()
+        if img is None:
+            return QPainterPath()
+        a = self.area_local(img)
+        return self.mapFromScene(img.mapToScene(geometry.shape_path(self.shape_kind, a, self._radius(a))))
+
+    def inset_path(self):
+        r = self.rect()
+        return geometry.shape_path(self.shape_kind, r, self._radius(r))
+
+    def area_aspect(self):
+        img = self.source()
+        if img is None:
+            return self.h / max(1e-6, self.w)
+        a = self.area_local(img)
+        return a.height() / max(1e-6, a.width())
+
+    def magnification(self):
+        img = self.source()
+        return self.w / max(1e-6, self.area_local(img).width()) if img is not None else 1.0
+
+    def set_size(self, w, h):
+        super().set_size(w, float(w) * self.area_aspect())  # never stretched
+
+    def set_area(self, area):
+        self.prepareGeometryChange()
+        self.area = [float(v) for v in area]
+        self.set_size(self.w, self.h)
+
+    def margin(self):
+        return self.sw / 2 + 3
+
+    def boundingRect(self):
+        m = self.margin() + 2
+        r = self.rect()
+        lens = self.lens_path()
+        if not lens.isEmpty():
+            r = r.united(lens.boundingRect())
+        return r.adjusted(-m, -m, m, m)
+
+    def shape(self):
+        return self.inset_path()
+
+    def paint(self, p, opt, widget=None):
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        r = self.rect()
+        inset = self.inset_path()
+        img = self.source()
+        pen = make_pen(self.stroke, self.sw)
+        if img is not None:
+            lens = self.lens_path(img)
+            if self.lines and not lens.boundingRect().intersects(r):
+                p.setPen(make_pen(self.stroke, max(1.0, self.sw * 0.6)))
+                for ln in geometry.hull_bridges(lens.toFillPolygon(), inset.toFillPolygon()):
+                    p.drawLine(ln)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(lens)
+        p.save()
+        p.setClipPath(inset, Qt.IntersectClip)
+        sc = self.scene()
+        p.fillRect(r, QColor(getattr(sc, "bg", "#ffffff")))
+        pm = img.pixmap() if img is not None else None
+        if pm is None or pm.isNull():
+            p.fillRect(r, QColor("#d9dbe0"))
+            p.setPen(QColor("#7a7f8a"))
+            p.drawText(r, Qt.AlignCenter, "Picture removed" if img is None else "Missing image")
+        else:
+            k = pm.width() / max(1.0, img.iw)
+            cx, cy, cw, ch = img.crop
+            u0, v0, u1, v1 = self.area
+            p.drawPixmap(r, pm, QRectF((cx + u0 * cw) * k, (cy + v0 * ch) * k, (u1 - u0) * cw * k,
+                                       (v1 - v0) * ch * k))
+        p.restore()
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(inset)
+
+    def to_dict(self):
+        d = self.base()
+        d.update(rot=0, src=self.src, area=[round(v, 5) for v in self.area], shape=self.shape_kind,
+                 stroke=self.stroke, sw=self.sw, lines=self.lines)
+        return d
+
+
+ITEM_TYPES = {"text": SlideText, "shape": SlideShape, "image": SlideImage, "line": SlideLine, "stroke": SlideStroke,
+              "zoom": SlideZoom}
 
 
 def item_from_dict(d):

@@ -13,8 +13,8 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDou
 
 from .. import context, geometry, media, textmarks, theme
 from ..widgets.common import ColorButton, hsep, shift_as_ctrl, label, push_button, section_label, tool_button, vsep
-from .items import (PAGE_SIZES, SlideImage, SlideItem, SlideLine, SlideShape, SlideStroke, SlideText, TextBearing,
-                    doc_aspect)
+from .items import (PAGE_SIZES, SlideImage, SlideItem, SlideLine, SlideShape, SlideStroke, SlideText, SlideZoom,
+                    TextBearing, doc_aspect)
 from .scene import SlideScene
 
 SLIDE_MIME = "application/x-denotive-slide-items"
@@ -597,6 +597,18 @@ class Inspector(QScrollArea):
         self.a2 = QCheckBox("End arrow")
         self.a2.toggled.connect(lambda on: self._attr("a2", on, types=(SlideLine,)))
         s.row(self.a1, self.a2)
+        self.stick = QCheckBox("Ends stick to objects")
+        self.stick.setToolTip("Drop an end on a corner, edge middle or centre and it follows that object around")
+        self.stick.toggled.connect(self._set_stick)
+        s.lay.addWidget(self.stick)
+        self.end_rows = {}
+        for key, name in (("g1", "Start"), ("g2", "End")):
+            state = label("", "Muted")
+            b = push_button("Attach…", "link")
+            b.setFocusPolicy(Qt.NoFocus)
+            b.clicked.connect(lambda _=False, k=key: self._attach_end(k))
+            s.row(name, state, b)
+            self.end_rows[key] = (state, b)
         # ---- ink
         s = self.sec_ink = Section("Ink")
         self.icolor = ColorButton("#e5484d", tip="Ink colour")
@@ -616,6 +628,36 @@ class Inspector(QScrollArea):
         nat = push_button("Actual size", "fit")
         nat.clicked.connect(self._natural_size)
         s.row(rep, nat)
+        zb = push_button("Zoom into part…", "callout")
+        zb.setToolTip("Then drag over the part of the picture to magnify")
+        zb.clicked.connect(lambda: self.page.start_zoom_tool())
+        s.row(zb)
+        # ---- zoom-in callout
+        s = self.sec_zoom = Section("Zoom-in")
+        self.zmag = QDoubleSpinBox()
+        self.zmag.setRange(1.0, 20.0)
+        self.zmag.setSingleStep(0.25)
+        self.zmag.setDecimals(2)
+        self.zmag.setSuffix(" ×")
+        self.zmag.setFixedWidth(84)
+        self.zmag.valueChanged.connect(self._set_zoom_mag)
+        s.row("Magnify", self.zmag)
+        self.zshape = QComboBox()
+        for k, n in geometry.SHAPES:
+            self.zshape.addItem(theme.icon("shape_" + k, 16), n, k)
+        self.zshape.currentIndexChanged.connect(
+            lambda _: self._attr("shape_kind", self.zshape.currentData(), types=(SlideZoom,)))
+        s.row("Shape", self.zshape)
+        self.zcolor = ColorButton("#e5484d", tip="Outline colour")
+        self.zcolor.colorChanged.connect(lambda c: self._attr("stroke", c, types=(SlideZoom,)))
+        self.zsw = spin(0.5, 30, 0.5, 1, " px", 74)
+        self.zsw.valueChanged.connect(lambda v: self._attr("sw", v, types=(SlideZoom,)))
+        s.row("Outline", self.zcolor, self.zsw)
+        self.zlines = QCheckBox("Lines to the area")
+        self.zlines.toggled.connect(lambda on: self._attr("lines", on, types=(SlideZoom,)))
+        s.lay.addWidget(self.zlines)
+        s.lay.addWidget(label("Drag the outline on the picture to magnify a different part; its corner dots "
+                              "resize it.", "Hint", wrap=True))
         # ---- arrange
         s = self.sec_arr = Section("Arrange")
         self.gx = spin(-9999, 9999, 1, 0, "", 64)
@@ -672,7 +714,7 @@ class Inspector(QScrollArea):
         self.layers.customContextMenuRequested.connect(self._layers_menu)
         s.lay.addWidget(self.layers)
         for sec in (self.sec_slide, self.sec_text, self.sec_fill, self.sec_line, self.sec_ink, self.sec_img,
-                    self.sec_arr, self.sec_layers):
+                    self.sec_zoom, self.sec_arr, self.sec_layers):
             self.v.addWidget(sec)
             if sec is not self.sec_layers:
                 self.v.addWidget(hsep())
@@ -728,6 +770,37 @@ class Inspector(QScrollArea):
             it.layout_children()
             it.update()
         self.scene.push_state()
+
+    def _set_zoom_mag(self, m):
+        if self._busy:
+            return
+        for z in self.selected((SlideZoom,)):
+            img = z.source()
+            if img is not None:
+                z.set_size(z.area_local(img).width() * m, 0)
+        self.scene.push_state()
+
+    def _set_stick(self, on):
+        if self._busy:
+            return
+        for ln in self.selected((SlideLine,)):
+            ln.stick = on
+            if not on:
+                ln.g1 = ln.g2 = None
+        self.scene.push_state()
+        self.refresh()
+
+    def _attach_end(self, key):
+        lines = self.selected((SlideLine,))
+        if len(lines) != 1:
+            return
+        ln = lines[0]
+        if getattr(ln, key):  # attached: this button detaches
+            setattr(ln, key, None)
+            self.scene.push_state()
+            self.refresh()
+            return
+        self.page.pick_attach(ln, key)
 
     def _set_ink_color(self, c):
         if self._busy:
@@ -883,7 +956,7 @@ class Inspector(QScrollArea):
         if self._busy:
             return
         for it in self.selected():
-            if not isinstance(it, SlideLine):
+            if not isinstance(it, (SlideLine, SlideZoom)):
                 it.setRotation(v)
         self.scene.push_state()
 
@@ -935,6 +1008,15 @@ class Inspector(QScrollArea):
             self.sec_ink.setVisible(any(isinstance(i, SlideStroke) for i in sel) or
                                     (not sel and sc.tool in ("pen", "highlighter")))
             self.sec_img.setVisible(any(isinstance(i, SlideImage) for i in sel))
+            zooms = [i for i in sel if isinstance(i, SlideZoom)]
+            self.sec_zoom.setVisible(bool(zooms))
+            if zooms:
+                z = zooms[0]
+                self.zmag.setValue(z.magnification())
+                self.zshape.setCurrentIndex(max(0, self.zshape.findData(z.shape_kind)))
+                self.zcolor.setColor(z.stroke)
+                self.zsw.setValue(z.sw)
+                self.zlines.setChecked(z.lines)
             self.sec_arr.setVisible(bool(sel))
             self.bg.setColor(sc.bg)
             name = next((n for n, (w, h) in PAGE_SIZES.items() if w == sc.page_w and h == sc.page_h), None)
@@ -995,6 +1077,15 @@ class Inspector(QScrollArea):
                 self.ldash.setCurrentText(ln.dash)
                 self.a1.setChecked(ln.a1)
                 self.a2.setChecked(ln.a2)
+                self.stick.setChecked(ln.stick)
+                for key, (state, b) in self.end_rows.items():
+                    g = getattr(ln, key)
+                    t = sc.item_by_uid(g.get("id")) if g else None
+                    state.setText(f"on {t.label()[:22]}" if t else "free")
+                    b.setText("Detach" if g else "Attach…")
+                    b.setToolTip("Let go of the object" if g else
+                                 "Then click an object: this end stays pinned to it, right where it is now")
+                    b.setEnabled(len(lines) == 1)
             inks = [i for i in sel if isinstance(i, SlideStroke)]
             if inks:
                 self.icolor.setColor(inks[0].color)
@@ -1034,7 +1125,7 @@ class Inspector(QScrollArea):
         self.layers.blockSignals(True)
         self.layers.clear()
         icons = {"text": "textbox", "shape": "shape_round", "image": "image", "line": "tool_line",
-                 "stroke": "ink"}
+                 "stroke": "ink", "zoom": "callout"}
         groups = self.scene.groups()
         for it in reversed(self.scene.sorted_items()):
             li = QListWidgetItem(theme.icon(icons.get(it.TYPE, "doc"), 16, theme.MUTED if it.isVisible() else theme.FAINT),
@@ -1062,7 +1153,8 @@ class EditorPage(QWidget):
     TOOLS = [("select", "cursor", "Select (V)", "V"), ("text", "tool_text", "Text box (T)", "T"),
              ("code", "code", "Code block", None), ("line", "tool_line", "Line (L)", "L"),
              ("arrow", "tool_arrow", "Arrow (A)", "A"), ("pen", "ink", "Pen (P)", "P"),
-             ("highlighter", "highlighter", "Highlighter (H)", "H"), ("eraser", "eraser", "Eraser (E)", "E")]
+             ("highlighter", "highlighter", "Highlighter (H)", "H"), ("eraser", "eraser", "Eraser (E)", "E"),
+             ("zoom", "callout", "Zoom-in callout (Z): drag over part of a picture to magnify it", "Z")]
 
     def __init__(self, main):
         super().__init__()
@@ -1267,6 +1359,8 @@ class EditorPage(QWidget):
         sc.edit_started.connect(lambda _: self._selection_changed())
         sc.edit_stopped.connect(self._selection_changed)
         sc.context_requested.connect(self._context_menu)
+        sc.notice.connect(lambda m: self.main.toast(m))
+        sc.pick_done.connect(self._pick_done)
         self.view.crop_requested.connect(self.crop_item)
         self.view.files_dropped.connect(self._drop_files)
         self.view.image_dropped.connect(lambda img, pos: self._add_qimage(img, pos))
@@ -1308,6 +1402,9 @@ class EditorPage(QWidget):
         self.act_overwrite.setVisible(version_id is None or version_id == it["ver"])
         src = f"from v{v['num']}" if v["id"] != it["ver"] else f"v{v['num']}"
         self.ver_label.setText(f"Editing {src} · saving stacks v{nxt} on top")
+        n = int(it.get("family") or 1)
+        if n > 1:
+            self.ver_label.setText(self.ver_label.text() + f" · linked: updates all {n} places")
         return True
 
     def _page_changed(self, k):
@@ -1385,8 +1482,25 @@ class EditorPage(QWidget):
         self.dirty = False
         self.finished.emit({"board_id": self.board_id, "item_id": self.item_id, "created": created, "saved": saved})
 
+    def start_zoom_tool(self):
+        self.set_tool("zoom")
+        self.main.toast("Drag over the part of the picture to magnify")
+
+    def pick_attach(self, line, key):
+        self.scene.start_pick(line, key)
+        self.view.viewport().setCursor(Qt.PointingHandCursor)
+        self.main.toast(f"Click the object to attach the line's {'start' if key == 'g1' else 'end'} to")
+
+    def _pick_done(self):
+        self.set_tool(self.scene.tool)  # puts the normal cursor back
+        self.inspector.refresh()
+
     def _escape(self):
         sc = self.scene
+        if sc.pick is not None:
+            sc.pick = None
+            self._pick_done()
+            return
         if sc.editing is not None:
             sc.stop_text_edit()
             return
@@ -1429,11 +1543,12 @@ class EditorPage(QWidget):
                 st.add_version(self.item_id, title, doc, text, thumb)
             else:
                 st.overwrite_version(self.version_id, title, doc, text, thumb)
-            it = st.item(self.item_id)
-            if it and abs(it["data"].get("aspect", 0.5625) - aspect) > 1e-3:
-                it["data"]["aspect"] = aspect
-                it["h"] = evidence_card_height(it["w"], aspect)
-                st.put_item(it)
+            for fid in st.family_ids(self.item_id):  # linked copies change shape too (e.g. a page was added)
+                it = st.item(fid)
+                if it and abs(it["data"].get("aspect", 0.5625) - aspect) > 1e-3:
+                    it["data"]["aspect"] = aspect
+                    it["h"] = evidence_card_height(it["w"], aspect)
+                    st.put_item(it)
         self._finish(saved=True, created=created)
 
     # ---- AI-drafted notes
@@ -1786,6 +1901,11 @@ class EditorPage(QWidget):
             it.set_crop(d.result_crop())
             self.scene.push_state()
 
+    def _punch(self, shape):
+        if self.scene.punch_zoom(shape) is not None:
+            self.main.toast("Zoomed in — drag the outline on the picture to change what's magnified")
+            self.inspector.refresh()
+
     def _context_menu(self, screen_pos, item):
         sc = self.scene
         m = QMenu(self)
@@ -1795,6 +1915,10 @@ class EditorPage(QWidget):
             if isinstance(item, SlideImage):
                 m.addAction(theme.icon("crop", 16), "Crop…", lambda: self.crop_item(item))
                 m.addAction(theme.icon("image", 16), "Replace…", self.replace_image)
+                m.addAction(theme.icon("callout", 16), "Zoom into part of this picture…", self.start_zoom_tool)
+            if isinstance(item, SlideShape) and sc.picture_under(sc._box(item), (item,)) is not None:
+                m.addAction(theme.icon("callout", 16), "Punch && Zoom: magnify what's under this shape",
+                            lambda: self._punch(item))
             m.addSeparator()
             m.addAction(theme.icon("cut", 16), "Cut", lambda: self.command("cut"))
             m.addAction(theme.icon("copy", 16), "Copy", lambda: self.command("copy"))

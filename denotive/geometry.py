@@ -1,7 +1,7 @@
 """Shape outlines, arrow heads and string curves shared by the board, the slide editor and the icons."""
 import math
 
-from PySide6.QtCore import QPointF, QRectF
+from PySide6.QtCore import QLineF, QPointF, QRectF
 from PySide6.QtGui import QPainterPath, QPolygonF
 
 SHAPES = [
@@ -98,6 +98,28 @@ def shape_text_rect(kind: str, r: QRectF) -> QRectF:
     if kind == "arrow":
         return r.adjusted(8, r.height() * 0.28, -r.width() * 0.3, -r.height() * 0.28)
     return r.adjusted(10, 8, -10, -8)
+
+
+def hull_bridges(a_pts, b_pts):
+    """The outside lines joining two outlines, like the sides of a cone from a lens to its magnified view."""
+    pts = sorted({(p.x(), p.y(), 0) for p in a_pts} | {(p.x(), p.y(), 1) for p in b_pts})
+    if len(pts) < 3:
+        return []
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower, upper = [], []
+    for p in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    for p in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    hull = lower[:-1] + upper[:-1]
+    return [QLineF(p[0], p[1], q[0], q[1]) for p, q in zip(hull, hull[1:] + hull[:1]) if p[2] != q[2]]
 
 
 def ortho(a: QPointF, b: QPointF) -> QPointF:

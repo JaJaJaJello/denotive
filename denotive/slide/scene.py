@@ -8,7 +8,7 @@ from PySide6.QtWidgets import QApplication, QGraphicsScene
 
 from .. import geometry, theme
 from .items import (GAP_COLOR, PAGE_GAP, SlideImage, SlideItem, SlideLine, SlideShape, SlideStroke, SlideText,
-                    TextBearing, item_from_dict, make_pen, short_id)
+                    SlideZoom, TextBearing, item_from_dict, make_pen, short_id)
 
 HANDLE_PX = 9
 HIT_PX = 8
@@ -20,6 +20,11 @@ HANDLE_NAMES = ("tl", "t", "tr", "r", "br", "b", "bl", "l")
 HANDLE_LOCAL = {"tl": (0, 0), "t": (0.5, 0), "tr": (1, 0), "r": (1, 0.5), "br": (1, 1), "b": (0.5, 1),
                 "bl": (0, 1), "l": (0, 0.5)}
 GROUP = "group"  # stands in for the item when a whole group's handles are grabbed
+# where a line end can stick to an object: corners, edge middles and the centre (fractions of its box)
+ANCHORS = ((0, 0), (0.5, 0), (1, 0), (1, 0.5), (1, 1), (0.5, 1), (0, 1), (0, 0.5), (0.5, 0.5))
+ANCHOR_PX = 11
+GLUED = QColor("#2fb36d")
+AREA_HANDLES = {"a_tl": (0, 0), "a_tr": (1, 0), "a_br": (1, 1), "a_bl": (0, 1)}
 
 
 def _no_snap():
@@ -33,6 +38,8 @@ class SlideScene(QGraphicsScene):
     edit_stopped = Signal()
     context_requested = Signal(object, object)  # screen QPoint, item or None
     page_added = Signal(int)
+    notice = Signal(str)  # a short message for the status toast
+    pick_done = Signal()
 
     def __init__(self, doc=None, parent=None):
         super().__init__(parent)
@@ -56,6 +63,9 @@ class SlideScene(QGraphicsScene):
         self._syncing = False
         self._prev_sel = set()
         self.hover_add = False
+        self._carrying = set()  # items moving together right now: their stuck lines move with them anyway
+        self._anchor_hint = None  # (item, (u, v) or None): sticking points to show while drawing a line
+        self.pick = None  # (line, "g1" | "g2") while waiting for a click on the object to attach to
         self.ctx_pos = QPointF()
         self.current_page = 0
         self.page_w, self.page_h = 1280.0, 720.0
@@ -184,6 +194,165 @@ class SlideScene(QGraphicsScene):
         self.push_state()
         self.update()
         return True
+
+    def item_by_uid(self, uid):
+        return next((i for i in self.slide_items() if i.uid == uid), None) if uid else None
+
+    def item_geometry_changed(self, it):
+        """Keeps zoom callouts on their picture and stuck line ends on their objects as things move."""
+        for o in self.slide_items():
+            if isinstance(o, SlideZoom) and (o is it or o.src == it.uid):
+                o.prepareGeometryChange()
+                o.update()
+            elif isinstance(o, SlideLine) and o is not it and o not in self._carrying and o.glued_to(it.uid):
+                self._follow(o)
+
+    def glue_point(self, g):
+        t = self.item_by_uid(g.get("id")) if g else None
+        if t is None:
+            return None
+        return t.mapToScene(QPointF(float(g["u"]) * t.w, float(g["v"]) * t.h))
+
+    def _follow(self, line):
+        if not line.stick:
+            return
+        a, b = self.glue_point(line.g1), self.glue_point(line.g2)
+        if a is None and b is None:
+            return
+        line.set_points(line.mapFromScene(a) if a is not None else line.p1,
+                        line.mapFromScene(b) if b is not None else line.p2)
+
+    def _unglue_moved(self, moved):
+        """A line dragged away from the objects its ends were stuck to lets go of them."""
+        uids = {i.uid for i in moved}
+        for it in moved:
+            if isinstance(it, SlideLine):
+                for k in ("g1", "g2"):
+                    g = getattr(it, k)
+                    if g and g.get("id") not in uids:
+                        setattr(it, k, None)
+
+    def _glue_targets(self, exclude):
+        return [o for o in self.slide_items() if not isinstance(o, SlideLine) and o.isVisible() and o not in exclude]
+
+    def anchor_at(self, pos, exclude=()):
+        """The nearest corner / edge middle / centre of an object within reach: (item, u, v, point), or None."""
+        if _no_snap():
+            return None
+        reach = ANCHOR_PX / max(0.05, self.view_scale)
+        best = None
+        for o in self._glue_targets(exclude):
+            for u, v in ANCHORS:
+                pt = o.mapToScene(QPointF(u * o.w, v * o.h))
+                d = QLineF(pt, pos).length()
+                if d <= reach and (best is None or d < best[0]):
+                    best = (d, o, u, v, pt)
+        return best[1:] if best else None
+
+    def _hint(self, pos, exclude=()):
+        """Which object's sticking points to show: the one being snapped to, else the one under the pointer."""
+        a = self.anchor_at(pos, exclude)
+        if a is not None:
+            return a[0], (a[1], a[2])
+        for o in self.items(pos):
+            while o is not None and not isinstance(o, SlideItem):
+                o = o.parentItem()
+            if o is not None and not isinstance(o, SlideLine) and o.isVisible() and o not in exclude:
+                return o, None
+        return None
+
+    def start_pick(self, line, key):
+        """The next click on an object attaches that end of the line to it, right where the end is now."""
+        self.pick = (line, key)
+
+    def _finish_pick(self, pos):
+        line, key = self.pick
+        self.pick = None
+        target = None
+        for o in self.items(pos):
+            while o is not None and not isinstance(o, SlideItem):
+                o = o.parentItem()
+            if o is not None and o is not line and not isinstance(o, SlideLine) and o.isVisible():
+                target = o
+                break
+        which = "Start" if key == "g1" else "End"
+        if target is None or line.scene() is not self:
+            self.notice.emit(f"{which} not attached: click an object to attach it to")
+        else:
+            end = line.mapToScene(line.p1 if key == "g1" else line.p2)
+            lp = target.mapFromScene(end)
+            setattr(line, key, {"id": target.uid, "u": round(lp.x() / max(1e-6, target.w), 5),
+                                "v": round(lp.y() / max(1e-6, target.h), 5)})
+            line.stick = True
+            self.push_state()
+            self.notice.emit(f"{which} attached to {target.label()} — it follows when that moves")
+        self.pick_done.emit()
+        self.update()
+
+    # ------------------------------------------------------------------ zoom-in callouts
+    def picture_under(self, rect, exclude=()):
+        """The topmost picture under the middle of rect."""
+        for o in self.items(rect.center()):
+            while o is not None and not isinstance(o, SlideItem):
+                o = o.parentItem()
+            if isinstance(o, SlideImage) and o.isVisible() and o not in exclude:
+                return o
+        return None
+
+    def make_zoom(self, img, area, shape="rect", stroke=None, sw=3.0):
+        """Magnifies the part of `img` under the scene rect `area` in a new box placed beside the picture."""
+        local = img.mapFromScene(area).boundingRect()
+        u0, u1 = sorted((max(0.0, min(1.0, local.left() / img.w)), max(0.0, min(1.0, local.right() / img.w))))
+        v0, v1 = sorted((max(0.0, min(1.0, local.top() / img.h)), max(0.0, min(1.0, local.bottom() / img.h))))
+        if (u1 - u0) * img.w < 4 or (v1 - v0) * img.h < 4:  # a click: a square a quarter of the picture wide
+            c = img.mapFromScene(area.center())
+            half = min(img.w, img.h) * 0.125
+            u0, u1 = max(0.0, (c.x() - half) / img.w), min(1.0, (c.x() + half) / img.w)
+            v0, v1 = max(0.0, (c.y() - half) / img.h), min(1.0, (c.y() + half) / img.h)
+        lw, lh = (u1 - u0) * img.w, (v1 - v0) * img.h
+        lens = img.mapToScene(QRectF(u0 * img.w, v0 * img.h, lw, lh)).boundingRect()
+        page = self.page_rects()[self.page_at(lens.center().y())]
+        m = max(1.2, min(2.5, page.width() * 0.42 / lw, page.height() * 0.6 / lh))
+        box = self._place_inset(lens, self._box(img), lw * m, lh * m, page)
+        z = SlideZoom({"x": box.x(), "y": box.y(), "w": box.width(), "h": box.height(), "src": img.uid,
+                       "area": [u0, v0, u1, v1], "shape": shape, "stroke": stroke or "#e5484d", "sw": sw})
+        self.add(z)
+        self.push_state()
+        return z
+
+    @staticmethod
+    def _place_inset(lens, pic, w, h, page):
+        """Beside the picture (right, left, below, above), inside the page, clear of the area it magnifies."""
+        gap = 28
+        cands = [QRectF(pic.right() + gap, lens.center().y() - h / 2, w, h),
+                 QRectF(pic.left() - gap - w, lens.center().y() - h / 2, w, h),
+                 QRectF(lens.center().x() - w / 2, pic.bottom() + gap, w, h),
+                 QRectF(lens.center().x() - w / 2, pic.top() - gap - h, w, h)]
+
+        def inside(r):
+            return QRectF(min(max(r.x(), page.left() + 8), page.right() - 8 - r.width()),
+                          min(max(r.y(), page.top() + 8), page.bottom() - 8 - r.height()), r.width(), r.height())
+
+        for r in cands:
+            if page.contains(r):
+                return r
+        for r in map(inside, cands):
+            if not r.intersects(lens):
+                return r
+        corner = QRectF(page.right() - 8 - w, page.top() + 8, w, h)
+        return corner if not corner.intersects(lens) else QRectF(page.left() + 8, page.top() + 8, w, h)
+
+    def punch_zoom(self, shape):
+        """Punch & Zoom: the area under a shape drawn on a picture becomes a zoom-in callout of that shape."""
+        img = self.picture_under(self._box(shape), (shape,))
+        if img is None:
+            return None
+        area = self._box(shape)
+        kind = getattr(shape, "shape_kind", "rect")
+        stroke = shape.stroke if getattr(shape, "stroke", None) and getattr(shape, "sw", 0) else None
+        sw = shape.sw if stroke else 3.0
+        self.removeItem(shape)
+        return self.make_zoom(img, area, kind, stroke, sw)
 
     def next_z(self):
         zs = [it.zValue() for it in self.slide_items()]
@@ -382,6 +551,14 @@ class SlideScene(QGraphicsScene):
             return {n: QPointF(r.x() + u * r.width(), r.y() + v * r.height()) for n, (u, v) in HANDLE_LOCAL.items()}
         if isinstance(it, SlideLine):
             return {"p1": it.mapToScene(it.p1), "p2": it.mapToScene(it.p2)}
+        if isinstance(it, SlideZoom):
+            pts = {n: it.mapToScene(QPointF(u * it.w, v * it.h)) for n, (u, v) in HANDLE_LOCAL.items() if len(n) == 2}
+            img = it.source()
+            if img is not None:
+                a = it.area_local(img)
+                pts.update({n: img.mapToScene(QPointF(a.x() + u * a.width(), a.y() + v * a.height()))
+                            for n, (u, v) in AREA_HANDLES.items()})
+            return pts
         pts = {n: it.mapToScene(QPointF(u * it.w, v * it.h)) for n, (u, v) in HANDLE_LOCAL.items()}
         pts["rot"] = it.mapToScene(QPointF(it.w / 2, -ROT_PX / max(0.05, self.view_scale)))
         if isinstance(it, SlideText):
@@ -404,6 +581,8 @@ class SlideScene(QGraphicsScene):
             d = QLineF(p, scene_pos).length()
             if d <= bd:
                 best, bd = n, d
+        if best is None and isinstance(it, SlideZoom) and it.mapToScene(it.lens_path()).contains(scene_pos):
+            best = "area"  # drag the outline on the picture to magnify a different part
         return it, best
 
     def cursor_for(self, it, name):
@@ -411,8 +590,10 @@ class SlideScene(QGraphicsScene):
             return None
         if name in ("rot",):
             return Qt.CrossCursor
-        if name in ("p1", "p2"):
+        if name in ("p1", "p2", "area"):
             return Qt.SizeAllCursor
+        if name in AREA_HANDLES:
+            return Qt.SizeFDiagCursor if name in ("a_tl", "a_br") else Qt.SizeBDiagCursor
         u, v = HANDLE_LOCAL[name]
         ang = math.degrees(math.atan2(v - 0.5, u - 0.5)) + (0 if it is GROUP else it.rotation())
         ang = (ang + 360) % 180
@@ -507,6 +688,7 @@ class SlideScene(QGraphicsScene):
                 return new_pos
             self._drag = {"start": {i: QPointF(i.pos()) for i in sel}, "box": self._union(sel),
                           "raw": None, "d": QPointF()}
+            self._carrying = set(sel)
             self._targets = None
             self._targets_for(sel)
         dr = self._drag
@@ -522,8 +704,14 @@ class SlideScene(QGraphicsScene):
         return start + dr["d"]
 
     def _end_drag(self):
+        if self._drag is not None:
+            self._unglue_moved(set(self._drag["start"]))
         self._drag = None
         self._targets = None
+        self._carrying = set()
+        if self._anchor_hint is not None:
+            self._anchor_hint = None
+            self.update()
         if self.guides:
             self.guides = []
             self.update()
@@ -579,6 +767,18 @@ class SlideScene(QGraphicsScene):
         p.setPen(QColor(theme.TEXT if self.hover_add else theme.MUTED))
         p.setFont(theme.ui_font(12.5 / s))
         p.drawText(ar, Qt.AlignCenter, "+  Add page")
+        # sticking points of the object a line end is near
+        hint = self._anchor_hint
+        if hint is not None and hint[0].scene() is self:
+            tgt, uv = hint
+            ap = QPen(QColor(theme.SELECT), 1.2)
+            ap.setCosmetic(True)
+            p.setPen(ap)
+            for u, v in ANCHORS:
+                on = uv == (u, v)
+                p.setBrush(QColor(theme.SELECT) if on else QColor("#ffffff"))
+                p.drawEllipse(tgt.mapToScene(QPointF(u * tgt.w, v * tgt.h)), (5.5 if on else 3.5) / s,
+                              (5.5 if on else 3.5) / s)
         # guides
         if self.guides:
             gp = QPen(GUIDE, 1)
@@ -627,7 +827,12 @@ class SlideScene(QGraphicsScene):
                         if n == "rot":
                             p.drawEllipse(pt, hs * 0.62, hs * 0.62)
                         elif n in ("p1", "p2"):
+                            stuck = getattr(single, "g1" if n == "p1" else "g2", None)
+                            p.setBrush(GLUED if stuck else QColor("#ffffff"))  # green: stuck to an object
                             p.drawEllipse(pt, hs * 0.6, hs * 0.6)
+                            p.setBrush(QColor("#ffffff"))
+                        elif n in AREA_HANDLES:
+                            p.drawEllipse(pt, hs * 0.45, hs * 0.45)
                         else:
                             p.drawRoundedRect(QRectF(pt.x() - hs / 2, pt.y() - hs / 2, hs, hs), hs * 0.2, hs * 0.2)
             if single is not None and single.locked:
@@ -646,6 +851,12 @@ class SlideScene(QGraphicsScene):
             elif c["kind"] in ("line", "arrow"):
                 p.setPen(make_pen(self.opts["line_color"], self.opts["line_w"]))
                 p.drawLine(c["start"], self._line_end(c))
+            elif c["kind"] == "zoom":
+                zp = QPen(QColor(theme.SELECT), 1.5, Qt.DashLine)
+                zp.setCosmetic(True)
+                p.setPen(zp)
+                p.setBrush(QColor(91, 140, 255, 30))
+                p.drawRect(self._drag_rect(c))
             elif c["kind"] in ("pen", "highlighter"):
                 hl = c["kind"] == "highlighter"
                 col = QColor(self.opts["hl_color" if hl else "pen_color"])
@@ -722,6 +933,10 @@ class SlideScene(QGraphicsScene):
             return
         if e.button() != Qt.LeftButton:
             return super().mousePressEvent(e)
+        if self.pick is not None:
+            self._finish_pick(pos)
+            e.accept()
+            return
         if self.add_page_rect().contains(pos):
             self.stop_text_edit()
             self.add_page()
@@ -752,8 +967,12 @@ class SlideScene(QGraphicsScene):
             pos = self.snap_point(pos)
             self._create = {"kind": "shape", "shape": tool.split(":", 1)[1], "start": pos, "cur": pos}
         elif tool in ("line", "arrow"):
-            pos = self.snap_point(pos)
-            self._create = {"kind": tool, "start": pos, "cur": pos}
+            a = self.anchor_at(pos)
+            g1 = {"id": a[0].uid, "u": a[1], "v": a[2]} if a else None
+            pos = a[3] if a else self.snap_point(pos)
+            self._create = {"kind": tool, "start": pos, "cur": pos, "g1": g1, "g2": None}
+        elif tool == "zoom":
+            self._create = {"kind": "zoom", "start": pos, "cur": pos}
         elif tool in ("pen", "highlighter"):
             self._create = {"kind": tool, "pts": [(pos.x(), pos.y())]}
         elif tool == "eraser":
@@ -775,7 +994,18 @@ class SlideScene(QGraphicsScene):
                     c["pts"].append((pos.x(), pos.y()))
             elif c["kind"] in ("line", "arrow") and e.modifiers() & Qt.ShiftModifier:
                 c["cur"] = pos
+                c["g2"] = None
                 self.guides = []
+                self._anchor_hint = None
+            elif c["kind"] in ("line", "arrow"):
+                a = self.anchor_at(pos)
+                c["g2"] = {"id": a[0].uid, "u": a[1], "v": a[2]} if a else None
+                c["cur"] = a[3] if a else self.snap_point(pos)
+                if a:
+                    self.guides = []
+                self._anchor_hint = self._hint(pos)
+            elif c["kind"] == "zoom":
+                c["cur"] = pos
             else:
                 c["cur"] = self.snap_point(pos)
             self.update()
@@ -785,11 +1015,21 @@ class SlideScene(QGraphicsScene):
             self._erase_at(pos)
             e.accept()
             return
+        if self.tool in ("line", "arrow") and not e.buttons():
+            hint = self._hint(pos)
+            if hint != self._anchor_hint:
+                self._anchor_hint = hint
+                self.update()
+        elif self._anchor_hint is not None and self._xf is None:
+            self._anchor_hint = None
+            self.update()
         super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e):
         if self._xf is not None:
-            self._xf = None
+            x, self._xf = self._xf, None
+            if x["handle"] in ("p1", "p2") and "glue" in x:  # sticks to the corner/middle it was dropped on
+                setattr(x["item"], "g1" if x["handle"] == "p1" else "g2", x.get("glue"))
             self._end_drag()
             self.push_state()
             e.accept()
@@ -845,6 +1085,9 @@ class SlideScene(QGraphicsScene):
 
     # ------------------------------------------------------------------ transforms
     def _begin_transform(self, it, h, pos):
+        if isinstance(it, SlideZoom) and (h == "area" or h in AREA_HANDLES):
+            self._xf = {"item": it, "handle": h, "start": pos, "area0": list(it.area)}
+            return
         if it is GROUP:
             members = self.selected()
             self._xf = {"item": GROUP, "handle": h, "box0": self._union(members),
@@ -902,6 +1145,9 @@ class SlideScene(QGraphicsScene):
         if it is GROUP:
             self._update_group_transform(pos, mods)
             return
+        if "area0" in x:
+            self._update_zoom_area(pos)
+            return
         if h == "rot":
             c = x["center"]
             ang = math.degrees(math.atan2(pos.y() - c.y(), pos.x() - c.x())) + 90
@@ -917,14 +1163,23 @@ class SlideScene(QGraphicsScene):
         if h in ("p1", "p2"):
             lp = it.mapFromScene(pos)
             other = it.p2 if h == "p1" else it.p1
+            x["glue"] = None
             if mods & Qt.ShiftModifier:
                 ang = math.atan2(lp.y() - other.y(), lp.x() - other.x())
                 ang = round(ang / (math.pi / 4)) * (math.pi / 4)
                 L = QLineF(other, lp).length()
                 lp = QPointF(other.x() + math.cos(ang) * L, other.y() + math.sin(ang) * L)
                 self.guides = []
+                self._anchor_hint = None
             else:
-                lp = it.mapFromScene(self.snap_point(pos, (it,)))
+                a = self.anchor_at(pos, (it,)) if it.stick else None
+                if a:  # onto a corner / edge middle / centre: it will stick there
+                    lp = it.mapFromScene(a[3])
+                    x["glue"] = {"id": a[0].uid, "u": a[1], "v": a[2]}
+                    self.guides = []
+                else:
+                    lp = it.mapFromScene(self.snap_point(pos, (it,)))
+                self._anchor_hint = self._hint(pos, (it,)) if it.stick else None
             if h == "p1":
                 it.set_points(lp, it.p2)
             else:
@@ -943,7 +1198,7 @@ class SlideScene(QGraphicsScene):
             y0 = min(lp.y(), y1 - m)
         if "b" in h:
             y1 = max(lp.y(), y0 + m)
-        keep = it.KEEP_ASPECT != bool(mods & Qt.ShiftModifier)
+        keep = isinstance(it, SlideZoom) or it.KEEP_ASPECT != bool(mods & Qt.ShiftModifier)
         upright = abs(x["rot0"] % 360) < 0.01
         if upright:
             x0, y0, x1, y1 = self._resize_box(x0, y0, x1, y1, w0, h0, h, keep and w0 > 0 and h0 > 0,
@@ -958,6 +1213,33 @@ class SlideScene(QGraphicsScene):
         c_scene = x["t0"].map(center_local)
         it.set_size(nw, nh)
         it.setPos(c_scene - QPointF(it.w / 2, it.h / 2))
+        self.update()
+
+    def _update_zoom_area(self, pos):
+        """Moves or resizes the magnified part of the picture (the outline drawn on it)."""
+        x = self._xf
+        it, h = x["item"], x["handle"]
+        img = it.source()
+        if img is None:
+            return
+        u0, v0, u1, v1 = x["area0"]
+        lp, sp = img.mapFromScene(pos), img.mapFromScene(x["start"])
+        if h == "area":
+            du = max(-u0, min(1 - u1, (lp.x() - sp.x()) / img.w))
+            dv = max(-v0, min(1 - v1, (lp.y() - sp.y()) / img.h))
+            it.set_area([u0 + du, v0 + dv, u1 + du, v1 + dv])
+        else:
+            fu, fv = max(0.0, min(1.0, lp.x() / img.w)), max(0.0, min(1.0, lp.y() / img.h))
+            mu, mv = 6 / img.w, 6 / img.h
+            if h in ("a_tl", "a_bl"):
+                u0 = min(fu, u1 - mu)
+            else:
+                u1 = max(fu, u0 + mu)
+            if h in ("a_tl", "a_tr"):
+                v0 = min(fv, v1 - mv)
+            else:
+                v1 = max(fv, v0 + mv)
+            it.set_area([u0, v0, u1, v1])
         self.update()
 
     def _update_group_transform(self, pos, mods):
@@ -1034,10 +1316,22 @@ class SlideScene(QGraphicsScene):
             a, b = c["start"], self._line_end(c)
             if QLineF(a, b).length() * self.view_scale < 6:
                 b = QPointF(a.x() + 220, a.y())
+            shift = QApplication.keyboardModifiers() & Qt.ShiftModifier
             it = SlideLine({"x": a.x(), "y": a.y(), "x1": 0, "y1": 0, "x2": b.x() - a.x(), "y2": b.y() - a.y(),
-                            "stroke": self.opts["line_color"], "sw": self.opts["line_w"], "a2": k == "arrow"})
+                            "stroke": self.opts["line_color"], "sw": self.opts["line_w"], "a2": k == "arrow",
+                            "g1": c.get("g1"), "g2": None if shift else c.get("g2")})
+            self._anchor_hint = None
             self.add(it)
             self.tool_reset.emit()
+        elif k == "zoom":
+            r = self._drag_rect(c)
+            img = self.picture_under(r)
+            self.tool_reset.emit()
+            if img is None:
+                self.notice.emit("Drag over part of a picture to zoom into it")
+                return
+            self.make_zoom(img, r)
+            return
         elif k in ("pen", "highlighter"):
             pts = c["pts"]
             if len(pts) == 1:
@@ -1061,15 +1355,25 @@ class SlideScene(QGraphicsScene):
         if self.editing is not None:
             return
         sel = [i for i in self.selected() if not i.locked]
+        gone = {i.uid for i in sel}
+        sel += [z for z in self.slide_items() if isinstance(z, SlideZoom) and z.src in gone and z not in sel]
         for it in sel:
             self.removeItem(it)
+        for ln in self.slide_items():  # lines stuck to something deleted stay where they are, free
+            if isinstance(ln, SlideLine):
+                for k in ("g1", "g2"):
+                    if (getattr(ln, k) or {}).get("id") in gone:
+                        setattr(ln, k, None)
         if sel:
             self.push_state()
 
     def nudge(self, dx, dy):
         sel = [i for i in self.selected() if not i.locked]
+        self._carrying = set(sel)
         for it in sel:
             it.moveBy(dx, dy)
+        self._carrying = set()
+        self._unglue_moved(sel)
         if sel:
             self.push_state()
         return bool(sel)
@@ -1085,11 +1389,17 @@ class SlideScene(QGraphicsScene):
         z = self.next_z()
         out = []
         new_groups = {}
+        ids = {d.get("id"): short_id() for d in dicts if d.get("id")}
         for d in dicts:
             d = dict(d)
-            d.pop("id", None)
+            d["id"] = ids.get(d.get("id")) or short_id()
             if d.get("group"):  # copies form their own group, apart from the originals
                 d["group"] = new_groups.setdefault(d["group"], short_id())
+            if d.get("type") == "zoom" and d.get("src") in ids:  # a copied picture keeps its copied zoom
+                d["src"] = ids[d["src"]]
+            for k in ("g1", "g2"):  # line ends stay stuck only to objects copied along with them
+                g = d.get(k)
+                d[k] = dict(g, id=ids[g["id"]]) if g and g.get("id") in ids else None
             d["x"] = d.get("x", 0) + offset
             d["y"] = d.get("y", 0) + offset
             d["z"] = z
@@ -1155,8 +1465,10 @@ class SlideScene(QGraphicsScene):
                 ref = ref.united(b)
 
         def move(unit, dx, dy):
+            self._carrying = set(sel)
             for it in unit:
                 it.moveBy(dx, dy)
+            self._carrying = set()
 
         if how in ("dist_h", "dist_v") and len(units) >= 3:
             horiz = how == "dist_h"
@@ -1189,6 +1501,7 @@ class SlideScene(QGraphicsScene):
                 elif how == "bottom":
                     dy = ref.bottom() - b.bottom()
                 move(unit, dx, dy)
+        self._unglue_moved(sel)
         self.push_state()
 
     def add_image(self, h, iw, ih, name="", at=None):

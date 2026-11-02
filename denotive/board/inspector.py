@@ -176,6 +176,7 @@ class BoardInspector(QScrollArea):
         h.addWidget(e)
         h.addWidget(hb)
         self.v.addLayout(h)
+        self._linked(it)
         self._add(hsep())
         self._add(section_label("Card"))
         sw = SwatchRow(theme.CARD_COLORS, 20)
@@ -194,6 +195,38 @@ class BoardInspector(QScrollArea):
             self._add(hsep())
             self._add(section_label("Text"))
             self._add(label(v["text"][:600] + ("…" if len(v["text"]) > 600 else ""), "Muted", wrap=True))
+
+    def _linked(self, it):
+        """Lists the other places this evidence/file is pinned, with a way to make this one independent."""
+        places = context.store.linked_places(it.id)
+        if not places:
+            return
+        self._add(hsep())
+        self._add(section_label(f"Linked copies · {len(places) + 1} places"))
+        self._add(label("Editing any of them edits all of them.", "Hint", wrap=True))
+        lst = QListWidget()
+        lst.setFixedHeight(min(150, 34 * len(places) + 8))
+        lst.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        lst.setTextElideMode(Qt.ElideRight)
+        here = self.page.board["id"]
+        for pl in places:
+            where = "This board" if pl["board_id"] == here else f"{pl['project']} › {pl['board']}"
+            li = QListWidgetItem(theme.icon("link", 16, theme.SELECT), where)
+            li.setData(Qt.UserRole, (pl["board_id"], pl["id"]))
+            lst.addItem(li)
+
+        def go(li):
+            bid, iid = li.data(Qt.UserRole)
+            if bid == here:
+                self.page.focus_item(iid)
+            else:
+                self.page.main.open_board(bid, focus_item=iid)
+        lst.itemClicked.connect(go)
+        self._add(lst)
+        un = push_button("Unlink this one", "link")
+        un.setToolTip("Give this one its own copy of the history; from now on its edits stay separate")
+        un.clicked.connect(lambda: self.page.unlink(it))
+        self._add(un)
 
     def _connections(self, it):
         if not it.strings:
@@ -274,6 +307,7 @@ class BoardInspector(QScrollArea):
             b.clicked.connect(fn)
             g.addWidget(b, i // 2, i % 2)
         self.v.addLayout(g)
+        self._linked(it)
         self._connections(it)
 
     # ------------------------------------------------------------------ text-ish items

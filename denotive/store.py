@@ -29,7 +29,7 @@ CREATE INDEX IF NOT EXISTS boards_project ON boards(project_id);
 CREATE TABLE IF NOT EXISTS items(
     id TEXT PRIMARY KEY, board_id TEXT NOT NULL, kind TEXT NOT NULL,
     x REAL, y REAL, w REAL, h REAL, z REAL, data TEXT, title TEXT, ver TEXT, vnum INTEGER,
-    created REAL, updated REAL, deleted REAL);
+    created REAL, updated REAL, deleted REAL, link_of TEXT);
 CREATE INDEX IF NOT EXISTS items_board ON items(board_id);
 CREATE INDEX IF NOT EXISTS items_updated ON items(updated);
 CREATE TABLE IF NOT EXISTS versions(
@@ -48,7 +48,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
 """
 
 ITEM_COLS = ("id", "board_id", "kind", "x", "y", "w", "h", "z", "data", "title", "ver", "vnum",
-             "created", "updated", "deleted")
+             "created", "updated", "deleted", "link_of")
 CONN_COLS = ("id", "board_id", "src", "dst", "label", "data", "created", "updated", "deleted")
 TEXT_KINDS = ("note", "sticky", "shape", "frame")
 VERSIONED = ("evidence", "file")
@@ -96,6 +96,10 @@ class Store:
         if "kind" not in cols:
             # 'map' boards are the per-project canvas of boards
             self.db.execute("ALTER TABLE boards ADD COLUMN kind TEXT DEFAULT 'board'")
+        if "link_of" not in {r[1] for r in self.db.execute("PRAGMA table_info(items)")}:
+            # a linked copy shows another item's evidence/file and shares its versions
+            self.db.execute("ALTER TABLE items ADD COLUMN link_of TEXT")
+        self.db.execute("CREATE INDEX IF NOT EXISTS items_link ON items(link_of)")
 
     def close(self):
         try:
@@ -328,7 +332,9 @@ class Store:
         return d
 
     # board rows carry the current version's thumbnail (and, for files, its small doc) for drawing
-    _ITEM_SELECT = ("SELECT i.*, v.thumb AS thumb, CASE WHEN i.kind='file' THEN v.doc END AS vdoc "
+    _ITEM_SELECT = ("SELECT i.*, v.thumb AS thumb, CASE WHEN i.kind='file' THEN v.doc END AS vdoc, "
+                    "(SELECT COUNT(*) FROM items f WHERE f.deleted IS NULL AND "
+                    " (f.id = COALESCE(i.link_of, i.id) OR f.link_of = COALESCE(i.link_of, i.id))) AS family "
                     "FROM items i LEFT JOIN versions v ON v.id = i.ver ")
 
     def items(self, board_id):
@@ -361,7 +367,7 @@ class Store:
             r["title"] = data.get("title") if r["kind"] == "frame" else text_title(data.get("text", ""))
         r["data"] = json.dumps(data)
         # version bookkeeping (current version, title, content date) is owned by add_version()
-        frozen = {"id", "created", "ver", "vnum"} | ({"title", "updated"} if r["kind"] in VERSIONED else set())
+        frozen = {"id", "created", "ver", "vnum", "link_of"} | ({"title", "updated"} if r["kind"] in VERSIONED else set())
         sets = ", ".join(f"{k}=excluded.{k}" for k in ITEM_COLS if k not in frozen)
         with self.tx():
             self.db.execute(f"INSERT INTO items({','.join(ITEM_COLS)}) VALUES({','.join('?' * len(ITEM_COLS))}) "
@@ -385,8 +391,69 @@ class Store:
         d["doc"] = json.loads(d["doc"]) if d.get("doc") else {}
         return d
 
+    def owner_of(self, item_id):
+        """The item whose versions this one shows: itself, or the original of a linked copy."""
+        r = self.q1("SELECT link_of FROM items WHERE id=?", (item_id,))
+        return (r["link_of"] if r else None) or item_id
+
+    def family_ids(self, item_id):
+        """The original and all its linked copies (deleted ones too, so they stay in step for a restore)."""
+        owner = self.owner_of(item_id)
+        return [r[0] for r in self.q("SELECT id FROM items WHERE id=? OR link_of=?", (owner, owner))]
+
+    def linked_places(self, item_id):
+        """Where else the same evidence/file is pinned: [{id, board_id, board, project}], live boards only."""
+        owner = self.owner_of(item_id)
+        return [dict(r) for r in self.q(
+            """SELECT i.id, i.board_id, b.name AS board, p.name AS project FROM items i
+               JOIN boards b ON b.id=i.board_id JOIN projects p ON p.id=b.project_id
+               WHERE (i.id=? OR i.link_of=?) AND i.id != ? AND i.deleted IS NULL
+                 AND b.deleted IS NULL AND p.deleted IS NULL ORDER BY p.name, b.name""", (owner, owner, item_id))]
+
+    def linked_copy_row(self, item_id, board_id, x, y):
+        """A new row showing the same evidence/file as item_id; editing either edits both."""
+        src = self.item(item_id)
+        owner = self.owner_of(item_id)
+        t = now()
+        return dict(id=new_id(), board_id=board_id, kind=src["kind"], x=x, y=y, w=src["w"], h=src["h"],
+                    z=self.max_z(board_id) + 1, data=dict(src["data"]), title=src["title"], ver=src["ver"],
+                    vnum=src["vnum"], created=t, updated=src["updated"], deleted=None, link_of=owner)
+
+    def _clone_versions(self, src, dst):
+        """Gives dst its own copies of src's versions; returns {old version id: new id}."""
+        board = (self.q1("SELECT board_id, kind FROM items WHERE id=?", (dst,)) or {})
+        ids = {}
+        for v in self.q("SELECT * FROM versions WHERE item_id=? ORDER BY num", (src,)):
+            nid = new_id()
+            ids[v["id"]] = nid
+            self.db.execute("INSERT INTO versions(id,item_id,num,title,doc,text,thumb,note,created) "
+                            "VALUES(?,?,?,?,?,?,?,?,?)",
+                            (nid, dst, v["num"], v["title"], v["doc"], v["text"], v["thumb"], v["note"], v["created"]))
+            if board:
+                self._fts_put(board["kind"], nid, dst, board["board_id"], v["num"], v["title"] or "", v["text"] or "")
+        return ids
+
+    def unlink(self, item_id):
+        """Makes item_id independent of its linked copies: from now on its edits are its own."""
+        owner = self.owner_of(item_id)
+        copies = [r[0] for r in self.q("SELECT id FROM items WHERE link_of=?", (owner,))]
+        with self.tx():
+            if item_id != owner:
+                ids = self._clone_versions(owner, item_id)
+                ver = self.q1("SELECT ver FROM items WHERE id=?", (item_id,))["ver"]
+                self.db.execute("UPDATE items SET link_of=NULL, ver=? WHERE id=?", (ids.get(ver, ver), item_id))
+            elif copies:
+                # the original goes its own way; the copies keep sharing with each other
+                new_owner, rest = copies[0], copies[1:]
+                ids = self._clone_versions(owner, new_owner)
+                ver = self.q1("SELECT ver FROM items WHERE id=?", (new_owner,))["ver"]
+                self.db.execute("UPDATE items SET link_of=NULL, ver=? WHERE id=?", (ids.get(ver, ver), new_owner))
+                for c in rest:
+                    self.db.execute("UPDATE items SET link_of=?, ver=? WHERE id=?", (new_owner, ids.get(ver, ver), c))
+
     def versions(self, item_id):
-        return [self._version(r) for r in self.q("SELECT * FROM versions WHERE item_id=? ORDER BY num", (item_id,))]
+        return [self._version(r) for r in self.q("SELECT * FROM versions WHERE item_id=? ORDER BY num",
+                                                 (self.owner_of(item_id),))]
 
     def version(self, vid):
         r = self.q1("SELECT * FROM versions WHERE id=?", (vid,))
@@ -398,6 +465,7 @@ class Store:
 
     def add_version(self, item_id, title, doc, text, thumb=None, note=None, ts=None):
         ts = ts or now()
+        item_id = self.owner_of(item_id)  # a linked copy saves into the original, and every copy follows
         it = self.q1("SELECT kind, board_id FROM items WHERE id=?", (item_id,))
         with self.tx():
             num = (self.q1("SELECT COALESCE(MAX(num), 0) FROM versions WHERE item_id=?", (item_id,))[0] or 0) + 1
@@ -405,8 +473,8 @@ class Store:
             self.db.execute("INSERT INTO versions(id,item_id,num,title,doc,text,thumb,note,created) "
                             "VALUES(?,?,?,?,?,?,?,?,?)",
                             (vid, item_id, num, title, json.dumps(doc), text, thumb, note, ts))
-            self.db.execute("UPDATE items SET ver=?, vnum=?, title=?, updated=? WHERE id=?",
-                            (vid, num, title, ts, item_id))
+            self.db.execute("UPDATE items SET ver=?, vnum=?, title=?, updated=? WHERE id=? OR link_of=?",
+                            (vid, num, title, ts, item_id, item_id))
             if it:
                 self._fts_put(it["kind"], vid, item_id, it["board_id"], num, title, text)
         return self.version(vid)
@@ -421,7 +489,8 @@ class Store:
             self.db.execute("UPDATE versions SET title=?, doc=?, text=?, thumb=? WHERE id=?",
                             (title, json.dumps(doc), text, thumb, vid))
             if it and it["ver"] == vid:
-                self.db.execute("UPDATE items SET title=?, updated=? WHERE id=?", (title, t, v["item_id"]))
+                self.db.execute("UPDATE items SET title=?, updated=? WHERE id=? OR link_of=?",
+                                (title, t, v["item_id"], v["item_id"]))
             if it:
                 self._fts_put(it["kind"], vid, v["item_id"], it["board_id"], v["num"], title, text)
         return self.version(vid)
@@ -615,16 +684,21 @@ class Store:
             where.append(f"{sort_col} >= ?")
             params.append(since)
         rows = self.q(f"""
-            SELECT i.id, i.kind, i.title, i.created, i.updated, i.board_id, i.vnum, i.data,
+            SELECT i.id, i.kind, i.title, i.created, i.updated, i.board_id, i.vnum, i.data, i.link_of,
                    b.name AS board_name, p.id AS project_id, p.name AS project_name, p.color AS project_color,
                    v.thumb AS thumb, substr(v.text, 1, 600) AS text
             FROM items i JOIN boards b ON b.id = i.board_id JOIN projects p ON p.id = b.project_id
             LEFT JOIN versions v ON v.id = i.ver
             WHERE {' AND '.join(where)}
             ORDER BY {sort_col} DESC LIMIT ?""", (*params, limit))
-        out = []
+        out, seen = [], set()
         for r in rows:
             d = dict(r)
+            if not board_id:  # linked copies are one piece of evidence
+                key = d.get("link_of") or d["id"]
+                if key in seen:
+                    continue
+                seen.add(key)
             d["data"] = json.loads(d["data"]) if d["data"] else {}
             if d["kind"] in TEXT_KINDS:
                 d["text"] = d["data"].get("text", "")
@@ -659,6 +733,15 @@ class Store:
                                 (iid, iid, t[0]))
 
     def _purge_item(self, iid):
+        copies = [r[0] for r in self.q("SELECT id FROM items WHERE link_of=?", (iid,))]
+        if copies:  # the original is going for good: a copy takes over its versions
+            heir = copies[0]
+            board = self.q1("SELECT board_id FROM items WHERE id=?", (heir,))[0]
+            self.db.execute("UPDATE versions SET item_id=? WHERE item_id=?", (heir, iid))
+            self.db.execute("UPDATE fts SET item=?, board=? WHERE item=? AND kind IN ('evidence','file')",
+                            (heir, board, iid))
+            self.db.execute("UPDATE items SET link_of=NULL WHERE id=?", (heir,))
+            self.db.execute("UPDATE items SET link_of=? WHERE link_of=?", (heir, iid))
         self.db.execute("DELETE FROM versions WHERE item_id=?", (iid,))
         self.db.execute("DELETE FROM fts WHERE item=?", (iid,))
         for c in self.q("SELECT id FROM connections WHERE src=? OR dst=?", (iid, iid)):

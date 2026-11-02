@@ -547,11 +547,13 @@ class BoardPage(QWidget):
             self.scene.delete(items)
         self.main.toast(f"{'Cut' if cut else 'Copied'} {len(items)} item{'s' if len(items) != 1 else ''}")
 
-    def paste(self, at=None):
+    def paste(self, at=None, linked=False):
         md = QApplication.clipboard().mimeData()
         pos = at or self.free_spot(self.view_center())
         if md.hasFormat(BOARD_MIME):
-            self.scene.paste_payload(json.loads(bytes(md.data(BOARD_MIME)).decode()), at=at)
+            items = self.scene.paste_payload(json.loads(bytes(md.data(BOARD_MIME)).decode()), at=at, linked=linked)
+            if linked and any(i is not None and i.row.get("link_of") for i in items):
+                self.main.toast("Pasted as a linked copy — editing either one changes both")
         elif md.hasImage():
             self._add_image_evidence(QImage(md.imageData()), pos)
         elif md.hasUrls() and any(u.isLocalFile() for u in md.urls()):
@@ -582,7 +584,7 @@ class BoardPage(QWidget):
             elif k == Qt.Key_X:
                 self.copy(cut=True)
             elif k == Qt.Key_V:
-                self.paste()
+                self.paste(linked=bool(shift))
             elif k == Qt.Key_D:
                 self.duplicate()
             elif k == Qt.Key_A:
@@ -1034,6 +1036,9 @@ class BoardPage(QWidget):
             self._link_menu(m, spos)
             m.addSeparator()
             m.addAction(theme.icon("paste", 16), "Paste", lambda: self.paste(spos))
+            if QApplication.clipboard().mimeData().hasFormat(BOARD_MIME):
+                m.addAction(theme.icon("link", 16), "Paste as linked copy", lambda: self.paste(spos, linked=True)) \
+                    .setShortcut("Ctrl+Shift+V")
             m.addAction(theme.icon("selectall", 16), "Select all",
                         lambda: [i.setSelected(True) for i in list(sc.items_by_id.values())])
             m.addAction(theme.icon("fit", 16), "Fit everything", self.fit)
@@ -1085,6 +1090,10 @@ class BoardPage(QWidget):
                             lambda: self.main.open_timeline(board_id=it.linked_id()))
                 m.addAction(theme.icon("edit", 16), "Rename board…", lambda: self.rename_linked(it))
                 m.addSeparator()
+            shared = [i for i in sel if isinstance(i, (EvidenceCard, FileCard))]
+            if shared and len(shared) == len(sel):
+                self._linked_menu(m, shared)
+                m.addSeparator()
             linkable = [i for i in sel if not isinstance(i, LineItem)]
             if len(linkable) == 2:
                 m.addAction(theme.icon("tool_string", 16), "Tie a string between these", self.connect_selected)
@@ -1110,6 +1119,47 @@ class BoardPage(QWidget):
             if not (self.is_map() and all(isinstance(i, BoardLinkCard) for i in sel)):
                 m.addAction(theme.icon("delete", 16), "Delete", self.delete_selected).setShortcut("Del")
         m.exec(gpos)
+
+    def _linked_menu(self, m, items):
+        """Linked copies: the same evidence or file pinned somewhere else, edited as one."""
+        m.addAction(theme.icon("link", 16), "Linked copy here", lambda: self.linked_copy(items))
+        sub = m.addMenu(theme.icon("link", 16), "Linked copy on another board")
+        for p in context.store.projects():
+            for b in context.store.boards(p["id"]):
+                if b["id"] != self.board["id"]:
+                    sub.addAction(f"{p['name']} › {b['name']}", lambda bid=b["id"]: self.linked_copy(items, bid))
+        if sub.isEmpty():
+            sub.setEnabled(False)
+
+    def linked_copy(self, items, board_id=None):
+        st = context.store
+        if board_id is None or board_id == self.board["id"]:
+            rows = [st.linked_copy_row(it.id, self.board["id"], it.x() + 40, it.y() + 40) for it in items]
+            self.scene.add_rows(rows, label="Linked copy")
+            self.main.toast("Linked copy made — editing either one changes both")
+            return
+        # on another board: lined up to the right of whatever is already there
+        there = st.items(board_id)
+        x = max((r["x"] + r["w"] for r in there), default=0) + 80
+        y = min((r["y"] for r in there), default=0)
+        with st.tx():
+            for it in items:
+                st.put_item(st.linked_copy_row(it.id, board_id, x, y))
+                y += it.h + 40
+        for it in items:
+            self.scene.refresh_item(it.id)  # the chain badge now counts the new copy
+        self.main.refresh_sidebar()
+        self.main.toast(f"Linked copy added to {st.board(board_id)['name']}")
+
+    def unlink(self, it):
+        st = context.store
+        family = st.family_ids(it.id)
+        st.unlink(it.id)
+        for fid in family:
+            if fid in self.scene.items_by_id:
+                self.scene.refresh_item(fid)
+        self.inspector.refresh()
+        self.main.toast("Unlinked — this one now has its own history")
 
     def _attach_at(self, pos):
         def go():

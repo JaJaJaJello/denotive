@@ -39,6 +39,12 @@ Change or back up the library from the ⚙ button in the sidebar.
   delete them together.
 - Navigate: wheel zooms, right-drag / middle-drag / Space-drag pans, **Ctrl+0** fits, **M** minimap, **I** side panel.
 - Ctrl+Z / Ctrl+Y undo and redo, Ctrl+D duplicate, Delete removes (deleted things go to Trash).
+- **Linked copies**: right-click an evidence card or file → *Linked copy here* or *Linked copy on another board*, or
+  copy it and press **Ctrl+Shift+V** on any board. The copies share one history, so editing any of them (or updating
+  a file's snapshot) updates them all. Put the same evidence in two frames or on two boards without tying strings.
+  Linked cards show a blue chain badge with how many places they're in. The side panel lists the places (click
+  to jump there) and has **Unlink this one** to give a copy its own history again. Deleting one copy leaves the
+  others intact, even after the Trash is emptied.
 
 ## Project maps and board links
 Projects are links of boards; boards are links of evidence.
@@ -106,6 +112,19 @@ The notes pane under the slide is searchable and is exported as speaker notes.
   away (move a line until its end lines up with the lines below it), and to the page edges and middle. Pink
   guide lines show what it's lined up with. Resizing, dragging a line's end and drawing new shapes and lines
   snap the same way. Hold **Alt** to move freely without snapping.
+- **Line ends stick to objects**: draw a line or arrow from (or drag its end onto) a corner, an edge's middle or
+  the centre of a shape, picture or text box. Little dots show the spots, and a stuck end turns green. Move,
+  resize or turn that object and the end follows, stretching the line. Dragging the line itself away, or
+  Alt-dragging an end, lets go. In the side panel, *Ends stick to objects* switches it off for that line, and
+  **Attach…** next to Start or End pins that end to whatever object you click next, right where the end is now
+  (**Detach** lets go).
+- **Zoom-in callouts**: pick the **zoom tool** (Z, or *Zoom into part…* on a picture) and drag over the part of a
+  picture you want to magnify. A box appears beside it showing that part enlarged at the picture's full
+  resolution, with an outline on the picture and lines joining the two. Or use **Punch & Zoom**: draw any shape
+  (circle, star…) over the picture, then right-click it → *Punch & Zoom*. The shape becomes the outline and the
+  box takes its shape and colour. Drag the outline to magnify a different part; its corner dots resize it. The
+  side panel sets the magnification, shape, outline colour and whether the joining lines show. The callout
+  moves with its picture and goes with it when the picture is deleted.
 - **Arrow keys** move the selection 1 pixel (**Shift**+arrow: 10).
 - **Formatting keys**: Ctrl+B, Ctrl+I, Ctrl+U, **Ctrl+Shift+X** strikethrough, **Ctrl+Shift+8** bullets,
   **Ctrl+Shift+7** numbers, the same as on the board.

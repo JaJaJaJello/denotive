@@ -154,6 +154,14 @@ class BoardScene(QGraphicsScene):
         for kind, row in recs:
             if kind == "item":
                 self._sync_item(st.item(row["id"]))
+        # linked copies on this board follow (and their chain badges recount)
+        done = {row["id"] for kind, row in recs if kind == "item"}
+        owners = {row.get("link_of") or row["id"] for kind, row in recs
+                  if kind == "item" and row.get("kind") in ("evidence", "file")}
+        for o in owners:
+            for fid in st.family_ids(o):
+                if fid not in done and fid in self.items_by_id:
+                    self._sync_item(st.item(fid))
         for kind, row in recs:
             if kind == "conn":
                 self._sync_conn(st.conn(row["id"]))
@@ -207,8 +215,11 @@ class BoardScene(QGraphicsScene):
         return self.add_rows([row], select=select, label="Add evidence")[0]
 
     def refresh_item(self, item_id):
-        row = context.store.item(item_id)
-        self._sync_item(row)
+        """Reloads an item from the store, along with its linked copies on this board."""
+        st = context.store
+        for fid in st.family_ids(item_id):
+            if fid == item_id or fid in self.items_by_id:
+                self._sync_item(st.item(fid))
         self.changed.emit()
         return self.items_by_id.get(item_id)
 
@@ -344,7 +355,8 @@ class BoardScene(QGraphicsScene):
                 out["conns"].append(dict(s.row))
         return out
 
-    def paste_payload(self, payload, at=None, offset=30.0):
+    def paste_payload(self, payload, at=None, offset=30.0, linked=False):
+        """Pastes copied items. linked=True turns evidence and files into linked copies of the originals."""
         st = context.store
         entries = payload.get("items") or []
         if not entries:
@@ -363,12 +375,16 @@ class BoardScene(QGraphicsScene):
             nid = new_id()
             idmap[r["id"]] = nid
             r.update(id=nid, board_id=self.bid, x=r["x"] + dx, y=r["y"] + dy, created=t, updated=t,
-                     deleted=None, ver=None, vnum=0)
+                     deleted=None, ver=None, vnum=0, link_of=None)
             if r["kind"] != "frame":
                 r["z"] = z
                 z += 1
             rows.append(r)
-            if e.get("version"):
+            src = st.item(e["row"]["id"]) if linked and r["kind"] in ("evidence", "file") else None
+            if src is not None:  # shares the original's versions instead of copying them
+                r.update(link_of=st.owner_of(src["id"]), ver=src["ver"], vnum=src["vnum"], title=src["title"],
+                         updated=src["updated"])
+            elif e.get("version"):
                 versions[nid] = e["version"]
         with st.tx():
             for r in rows:

@@ -117,12 +117,37 @@ class BoardItem(QGraphicsObject):
         self.setPos(float(row.get("x") or 0), float(row.get("y") or 0))
         self.setZValue(float(row.get("z") or 0))
         self.on_row()
+        n = self.linked_count()
+        self.setToolTip(f"Linked: the same {self.KIND} is pinned in {n} places — editing one edits them all"
+                        if n > 1 else "")
         for s in self.strings:
             s.update_path()
         self.update()
 
     def on_row(self):
         pass
+
+    def linked_count(self):
+        """How many places show this evidence/file (1 unless it has linked copies)."""
+        return int(self.row.get("family") or 1) if self.KIND in ("evidence", "file") else 1
+
+    def paint_link_badge(self, p, right, y, k=1.0):
+        """A small chain chip ending at x=right: this card has linked copies."""
+        n = self.linked_count()
+        if n < 2:
+            return
+        f = theme.ui_font(10.5 * k, QFont.Bold)
+        txt = str(n)
+        w = 12 * k + QFontMetricsF(f).horizontalAdvance(txt) + 14 * k
+        r = QRectF(right - w, y, w, 16 * k)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(theme.SELECT))
+        p.drawRoundedRect(r, 8 * k, 8 * k)
+        p.setPen(QColor("#ffffff"))
+        p.setFont(theme.icon_font(9.5 * k))
+        p.drawText(QRectF(r.x() + 4 * k, r.y(), 12 * k, r.height()), Qt.AlignCenter, theme.GLYPHS["link"])
+        p.setFont(f)
+        p.drawText(QRectF(r.x() + 15 * k, r.y(), w - 18 * k, r.height()), Qt.AlignCenter, txt)
 
     def current_row(self):
         r = dict(self.row)
@@ -443,6 +468,7 @@ class EvidenceCard(BoardItem):
             p.drawText(QRectF(m, yb, tr.width() * 0.7, 14 * k), Qt.AlignLeft | Qt.AlignVCenter,
                        short_date(self.row.get("updated")))
             vn = int(self.row.get("vnum") or 1)
+            right = self.w - m
             if vn > 1:
                 txt = f"v{vn}"
                 fb = theme.ui_font(10.5 * k, QFont.Bold)
@@ -454,6 +480,8 @@ class EvidenceCard(BoardItem):
                 p.drawRoundedRect(br, 8 * k, 8 * k)
                 p.setPen(QColor("#ffffff"))
                 p.drawText(br, Qt.AlignCenter, txt)
+                right = br.left() - 5 * k
+            self.paint_link_badge(p, right, yb - 1 * k, k)
         if self.by_coinv():
             self.paint_coinv_badge(p, lod, m + 6 * k, m + 6 * k, k)
         self.paint_pin(p, lod)
@@ -584,6 +612,7 @@ class FileCard(BoardItem):
         p.drawRoundedRect(cr, 8.5, 8.5)
         p.setPen(accent.lighter(140))
         p.drawText(cr, Qt.AlignCenter, chip)
+        self.paint_link_badge(p, cr.left() - 6, self.h - 25)
         self.paint_pin(p, lod)
         self.paint_selection(p, lod, 10)
 

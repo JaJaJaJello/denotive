@@ -289,6 +289,18 @@ def _draw_script(sup):
     return draw
 
 
+def _draw_callout(p, s, color):
+    """A small outlined area with lines out to a bigger box: a zoom-in callout."""
+    _pen(p, color, s * 0.07)
+    small = QRectF(s * 0.08, s * 0.56, s * 0.26, s * 0.26)
+    big = QRectF(s * 0.44, s * 0.1, s * 0.48, s * 0.48)
+    p.drawRect(small)
+    p.drawRect(big)
+    _pen(p, color, s * 0.045)
+    p.drawLine(small.topLeft(), big.topLeft())
+    p.drawLine(small.bottomRight(), big.bottomRight())
+
+
 def _draw_group(ungroup):
     def draw(p, s, color):
         pen = QPen(QColor(color), s * 0.06, Qt.DashLine)
@@ -312,7 +324,7 @@ def _draw_group(ungroup):
 
 CUSTOM = {
     "sparkle": _draw_sparkle, "coinv": _draw_coinv, "group": _draw_group(False), "ungroup": _draw_group(True),
-    "superscript": _draw_script(True), "subscript": _draw_script(False),
+    "superscript": _draw_script(True), "subscript": _draw_script(False), "callout": _draw_callout,
     "tool_text": _draw_text_tool, "tool_line": _draw_line_tool, "tool_arrow": _draw_arrow_tool,
     "tool_string": _draw_string_tool, "tool_hand": _draw_hand_tool, "tool_frame": _draw_frame_tool,
     "evidence": _draw_evidence, "textbox": _draw_textbox, "board": _draw_board,

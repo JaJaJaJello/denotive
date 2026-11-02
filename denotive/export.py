@@ -279,10 +279,13 @@ def print_boards(printer, board_ids, overview=True, order="position", only_ids=N
 def _render_item_png(d, doc, scale=2.0):
     """Picture of a single slide object (transparent background) and its slide-space rect."""
     from .slide.scene import SlideScene
+    extra = []
+    if d.get("type") == "zoom":  # it draws from its picture, which stays hidden
+        extra = [dict(s, hidden=True) for s in doc.get("items", []) if s.get("id") == d.get("src")]
     sc = SlideScene({"w": doc.get("w", 1280), "h": doc.get("h", 720), "bg": doc.get("bg", "#ffffff"),
-                     "items": [dict(d, hidden=False)]})
+                     "items": [dict(d, hidden=False)] + extra})
     sc.transparent = True
-    its = sc.slide_items()
+    its = [i for i in sc.slide_items() if i.isVisible()]
     if not its:
         return None, None
     it = its[0]
