@@ -289,6 +289,12 @@ def _draw_script(sup):
     return draw
 
 
+def _draw_justify(p, s, color):
+    _pen(p, color, s * 0.08)
+    for y in (0.24, 0.42, 0.6, 0.78):
+        p.drawLine(QPointF(s * 0.16, s * y), QPointF(s * 0.84, s * y))
+
+
 def _draw_callout(p, s, color):
     """A small outlined area with lines out to a bigger box: a zoom-in callout."""
     _pen(p, color, s * 0.07)
@@ -325,6 +331,7 @@ def _draw_group(ungroup):
 CUSTOM = {
     "sparkle": _draw_sparkle, "coinv": _draw_coinv, "group": _draw_group(False), "ungroup": _draw_group(True),
     "superscript": _draw_script(True), "subscript": _draw_script(False), "callout": _draw_callout,
+    "alignjustify": _draw_justify,
     "tool_text": _draw_text_tool, "tool_line": _draw_line_tool, "tool_arrow": _draw_arrow_tool,
     "tool_string": _draw_string_tool, "tool_hand": _draw_hand_tool, "tool_frame": _draw_frame_tool,
     "evidence": _draw_evidence, "textbox": _draw_textbox, "board": _draw_board,

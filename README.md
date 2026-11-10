@@ -37,6 +37,9 @@ Change or back up the library from the ⚙ button in the sidebar.
 - **Select several things** with Shift-click or Ctrl-click (click again to drop one), or drag a box around them.
   Every selected item gets its own outline, so you can see exactly what you've picked; move, align, restyle or
   delete them together.
+- **Scale several at once**: with several things selected, drag the round grip at the bottom-right of any of them.
+  The whole selection grows or shrinks together about its top-left corner, keeping its layout: positions, sizes,
+  line lengths and the text size of notes, stickies and shapes all scale. One Ctrl+Z puts it back.
 - Navigate: wheel zooms, right-drag / middle-drag / Space-drag pans, **Ctrl+0** fits, **M** minimap, **I** side panel.
 - Ctrl+Z / Ctrl+Y undo and redo, Ctrl+D duplicate, Delete removes (deleted things go to Trash).
 - **Linked copies**: right-click an evidence card or file → *Linked copy here* or *Linked copy on another board*, or
@@ -57,6 +60,10 @@ Projects are links of boards; boards are links of evidence.
 - **Clicking a board in the sidebar** zooms to fit everything on it. If you ever pan or zoom off into empty
   space, a *back to the board* button appears at the top.
 - Exporting a project starts with its map.
+- **Open in new window**: right-click a board in the sidebar (or a project, for its map), or use the board's ⋯
+  menu. It opens in a second DeNotive window, on your other screen if you have one; or snap the two windows side
+  by side (Win+←/→) for a split screen. Each window shows what the other changes within a couple of seconds.
+  Each window keeps its own undo history, and the main window is the one that remembers where you left off.
 
 ## Co-Investigator (optional AI)
 Nothing is sent anywhere until you ask. Set it up in **Settings → AI settings…**, choosing a model separately for
@@ -117,7 +124,9 @@ The notes pane under the slide is searchable and is exported as speaker notes.
   resize or turn that object and the end follows, stretching the line. Dragging the line itself away, or
   Alt-dragging an end, lets go. In the side panel, *Ends stick to objects* switches it off for that line, and
   **Attach…** next to Start or End pins that end to whatever object you click next, right where the end is now
-  (**Detach** lets go).
+  (**Detach** lets go). **Ctrl+drag** a stuck (green) end to keep it stopped short of its spot: the tip stays that
+  far away but always aims straight at the spot (say, the middle of a word), wherever the word or the other end
+  moves. A green dot and a dashed line show the spot. Ctrl+drag back onto it to remove the gap.
 - **Zoom-in callouts**: pick the **zoom tool** (Z, or *Zoom into part…* on a picture) and drag over the part of a
   picture you want to magnify. A box appears beside it showing that part enlarged at the picture's full
   resolution, with an outline on the picture and lines joining the two. Or use **Punch & Zoom**: draw any shape
@@ -126,8 +135,17 @@ The notes pane under the slide is searchable and is exported as speaker notes.
   side panel sets the magnification, shape, outline colour and whether the joining lines show. The callout
   moves with its picture and goes with it when the picture is deleted.
 - **Arrow keys** move the selection 1 pixel (**Shift**+arrow: 10).
+- **Copy into PowerPoint, Word or Excel**: select things and press Ctrl+C, then paste in the other app. They
+  arrive as real, editable PowerPoint objects at their true size and layout: shapes stay shapes with their text,
+  text boxes keep their formatting (bold, lists, sub/superscript, columns), pictures stay pictures, lines and
+  arrows stay lines and ink becomes freeform drawing. Zoom-in callouts and tables come over as pictures. Other
+  apps (Paint, chat apps) get a picture.
 - **Formatting keys**: Ctrl+B, Ctrl+I, Ctrl+U, **Ctrl+Shift+X** strikethrough, **Ctrl+Shift+8** bullets,
   **Ctrl+Shift+7** numbers, the same as on the board.
+- **Justify and columns**: the Text panel has **Justify** (both edges straight) next to the other alignments, and
+  **Columns** with the gap between them for text boxes. The text flows down one column into the next, and the
+  columns stay balanced. While you type in the box it shows as one column so the cursor behaves; it goes back
+  to columns when you click away. PowerPoint export and copying keep real columns.
 - **Superscript / subscript**: **Ctrl+=** raises and **Ctrl+-** lowers the selected text (or, with a text box
   selected but not being edited, all of it); press again for normal. The **x²** / **x₂** buttons in the Text panel
   do the same. They carry through to PDF and PowerPoint, and the Co-Investigator reads them as 10⁻³, H₂O, x^(n).

@@ -213,14 +213,27 @@ class SlideScene(QGraphicsScene):
             return None
         return t.mapToScene(QPointF(float(g["u"]) * t.w, float(g["v"]) * t.h))
 
+    @staticmethod
+    def _stand_off(anchor, other, g):
+        """An end with a gap stops that far short of its spot, still aimed straight at it."""
+        gap = float((g or {}).get("gap") or 0)
+        v = anchor - other
+        length = math.hypot(v.x(), v.y())
+        if gap <= 0 or length < 1e-6:
+            return anchor
+        gap = min(gap, length * 0.9)
+        return anchor - v * (gap / length)
+
     def _follow(self, line):
         if not line.stick:
             return
         a, b = self.glue_point(line.g1), self.glue_point(line.g2)
         if a is None and b is None:
             return
-        line.set_points(line.mapFromScene(a) if a is not None else line.p1,
-                        line.mapFromScene(b) if b is not None else line.p2)
+        a = a if a is not None else line.mapToScene(line.p1)
+        b = b if b is not None else line.mapToScene(line.p2)
+        line.set_points(line.mapFromScene(self._stand_off(a, b, line.g1)),
+                        line.mapFromScene(self._stand_off(b, a, line.g2)))
 
     def _unglue_moved(self, moved):
         """A line dragged away from the objects its ends were stuck to lets go of them."""
@@ -423,7 +436,10 @@ class SlideScene(QGraphicsScene):
         if self.editing is item:
             return
         self.stop_text_edit()
+        dp = item.doc_point(item.mapFromScene(scene_pos)) if scene_pos is not None and hasattr(item, "doc_point") \
+            else None
         self.editing = item
+        item.layout_children()  # a column box shows as one column while typing
         t = item.text
         t.setTextInteractionFlags(Qt.TextEditorInteraction)
         t.setAcceptedMouseButtons(Qt.LeftButton)
@@ -433,7 +449,8 @@ class SlideScene(QGraphicsScene):
         if select_all:
             c.select(QTextCursor.Document)
         elif scene_pos is not None:
-            pos = t.document().documentLayout().hitTest(t.mapFromScene(scene_pos), Qt.FuzzyHit)
+            pos = t.document().documentLayout().hitTest(dp if dp is not None else t.mapFromScene(scene_pos),
+                                                        Qt.FuzzyHit)
             c.setPosition(max(0, pos))
         else:
             c.movePosition(QTextCursor.End)
@@ -459,6 +476,7 @@ class SlideScene(QGraphicsScene):
         if isinstance(it, SlideText) and not it.text_content().strip() and not it.fill and it.scene() is self:
             self.removeItem(it)
         else:
+            it.layout_children()  # back into columns
             it.update()
             if it.group and it.isSelected():
                 self._sync_groups()  # bring the rest of its group back into the selection
@@ -835,6 +853,17 @@ class SlideScene(QGraphicsScene):
                             p.drawEllipse(pt, hs * 0.45, hs * 0.45)
                         else:
                             p.drawRoundedRect(QRectF(pt.x() - hs / 2, pt.y() - hs / 2, hs, hs), hs * 0.2, hs * 0.2)
+            if isinstance(single, SlideLine):  # an end kept short of its spot: show the spot it aims at
+                for key, end in (("g1", single.p1), ("g2", single.p2)):
+                    g = getattr(single, key)
+                    spot = self.glue_point(g) if g and g.get("gap") else None
+                    if spot is not None:
+                        dp = QPen(GLUED, 1.2, Qt.DashLine)
+                        dp.setCosmetic(True)
+                        p.setPen(dp)
+                        p.drawLine(single.mapToScene(end), spot)
+                        p.setBrush(GLUED)
+                        p.drawEllipse(spot, hs * 0.38, hs * 0.38)
             if single is not None and single.locked:
                 p.setFont(theme.icon_font(12 / s))
                 p.setPen(QColor(theme.SELECT))
@@ -1161,6 +1190,18 @@ class SlideScene(QGraphicsScene):
             self.update()
             return
         if h in ("p1", "p2"):
+            key = "g1" if h == "p1" else "g2"
+            g = getattr(it, key)
+            anchor = self.glue_point(g) if g and mods & Qt.ControlModifier else None
+            if anchor is not None:  # Ctrl-drag a stuck end: stays stuck, but stops this far short of its spot
+                gap = QLineF(anchor, pos).length()
+                x["glue"] = dict(g, gap=round(gap, 1) if gap * self.view_scale >= 4 else 0)
+                setattr(it, key, x["glue"])
+                self._follow(it)
+                self.guides = []
+                self._anchor_hint = None
+                self.update()
+                return
             lp = it.mapFromScene(pos)
             other = it.p2 if h == "p1" else it.p1
             x["glue"] = None
@@ -1184,6 +1225,11 @@ class SlideScene(QGraphicsScene):
                 it.set_points(lp, it.p2)
             else:
                 it.set_points(it.p1, lp)
+            og = getattr(it, "g2" if h == "p1" else "g1")
+            spot = self.glue_point(og) if og and og.get("gap") else None
+            if spot is not None:  # the other end keeps aiming at its spot from the new angle
+                tip = it.mapFromScene(self._stand_off(spot, it.mapToScene(lp), og))
+                it.set_points(lp, tip) if h == "p1" else it.set_points(tip, lp)
             self.update()
             return
         lp = x["inv"].map(pos)
@@ -1503,6 +1549,31 @@ class SlideScene(QGraphicsScene):
                 move(unit, dx, dy)
         self._unglue_moved(sel)
         self.push_state()
+
+    def picture_of(self, items, scale=2.0):
+        """A see-through picture of just these items (for apps that can't take them as shapes)."""
+        dicts = [it.to_dict() for it in items]
+        ids = {d["id"] for d in dicts}
+        srcs = {d.get("src") for d in dicts if d.get("type") == "zoom"}
+        extra = [dict(o.to_dict(), hidden=True) for o in self.slide_items() if o.uid in srcs and o.uid not in ids]
+        sc = SlideScene({"w": self.page_w, "h": self.page_h, "pages": self.pages, "bg": self.bg,
+                         "items": dicts + extra})
+        sc.transparent = True
+        sc.rendering = True
+        r = QRectF()
+        for it in sc.slide_items():
+            if it.isVisible():
+                r = r.united(it.sceneBoundingRect())
+        img = QImage(max(1, int(r.width() * scale)), max(1, int(r.height() * scale)),
+                     QImage.Format_ARGB32_Premultiplied)
+        img.fill(Qt.transparent)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        p.setRenderHint(QPainter.TextAntialiasing)
+        sc.render(p, QRectF(0, 0, img.width(), img.height()), r)
+        p.end()
+        return img
 
     def add_image(self, h, iw, ih, name="", at=None):
         """Places an image asset, scaled to fit comfortably on the page in view."""

@@ -67,7 +67,8 @@ def main():
         app.setWindowIcon(QIcon(ico))
 
     from .window import MainWindow
-    w = MainWindow()
+    target = sys.argv[sys.argv.index("--window") + 1] if "--window" in sys.argv[:-1] else None
+    w = MainWindow(window_board=target)
     w.show()
     if "--selftest" in sys.argv:
         sys.exit(_selftest(app, w, sys.argv[sys.argv.index("--selftest") + 1]))

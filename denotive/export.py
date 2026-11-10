@@ -504,6 +504,10 @@ class _PptxBuilder:
             self._line_style(shp.line, d["stroke"], float(d["sw"]))
         if d.get("rot"):
             shp.rotation = float(d["rot"])
+        if int(d.get("cols", 1) or 1) > 1:  # PowerPoint flows the text into real columns
+            body = tf._txBody.bodyPr
+            body.set("numCol", str(int(d["cols"])))
+            body.set("spcCol", str(int(self.L(float(d.get("colgap", 24))))))
         self._fill_text(tf, d)
         return True
 
@@ -593,6 +597,127 @@ class _PptxBuilder:
 
     def save(self, path):
         self.prs.save(str(path))
+
+
+# ---------------------------------------------------------------------- copying into Office apps
+GVML_MIME = 'application/x-qt-windows-mime;value="Art::GVML ClipFormat"'
+_P = "http://schemas.openxmlformats.org/presentationml/2006/main"
+_A = "http://schemas.openxmlformats.org/drawingml/2006/main"
+_R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_LC = "http://schemas.openxmlformats.org/drawingml/2006/lockedCanvas"
+
+
+def _to_dml(el):
+    """A slide shape (PresentationML) rebuilt the way Office puts shapes on the clipboard (plain DrawingML)."""
+    import copy
+    from lxml import etree
+    name = etree.QName(el)
+    if name.namespace != _P:
+        return copy.deepcopy(el)
+    if name.localname == "nvPr":
+        return None  # slide-only details
+    if name.localname == "txBody":
+        tx = etree.Element(f"{{{_A}}}txSp")
+        body = etree.SubElement(tx, f"{{{_A}}}txBody")
+        body.extend(copy.deepcopy(c) for c in el)
+        etree.SubElement(tx, f"{{{_A}}}useSpRect")
+        return tx
+    new = etree.Element(f"{{{_A}}}{name.localname}", attrib=dict(el.attrib))
+    for c in el:
+        d = _to_dml(c)
+        if d is not None:
+            new.append(d)
+    if name.localname == "sp":  # DrawingML wants the text before the style
+        tx, style = new.find(f"{{{_A}}}txSp"), new.find(f"{{{_A}}}style")
+        if tx is not None and style is not None:
+            style.addprevious(tx)
+    return new
+
+
+def office_clipboard(items, doc):
+    """Slide items as Office's own clipboard drawing ("Art::GVML ClipFormat"): pasted into PowerPoint, Word or
+    Excel they arrive as real shapes, text boxes, pictures and lines rather than one flat image."""
+    from lxml import etree
+    from pptx.opc.constants import RELATIONSHIP_TYPE as RT
+    pb = _PptxBuilder(editable=True)
+    pb._setup(doc)
+    pb.f, pb.ox, pb.oy, pb.pt_k = 9525.0, 0.0, 0.0, 1.0  # true size: 1 px at 96 dpi = 9525 EMU
+    slide = pb.prs.slides.add_slide(pb.blank)
+    for d in sorted(items, key=lambda d: d.get("z", 0)):
+        try:
+            ok = pb._native(slide, d)
+        except Exception:
+            ok = False
+        if not ok:
+            pb._picture_of(slide, d, doc)
+    shapes = [_to_dml(el) for el in slide.shapes._spTree.iterchildren()
+              if etree.QName(el).localname in ("sp", "pic", "cxnSp", "grpSp", "graphicFrame")]
+    if not shapes:
+        return None
+    # pictures travel inside the package
+    media_parts, exts = {}, set()
+    for blip in (b for s in shapes for b in s.iter(f"{{{_A}}}blip")):
+        rid = blip.get(f"{{{_R}}}embed")
+        if not rid:
+            continue
+        if rid not in media_parts:
+            part = slide.part.related_part(rid)
+            ext = str(part.partname).rsplit(".", 1)[-1].lower()
+            exts.add(ext)
+            media_parts[rid] = (f"rId{len(media_parts) + 2}", f"image{len(media_parts) + 1}.{ext}", part.blob)
+        blip.set(f"{{{_R}}}embed", media_parts[rid][0])
+    # the group's box: everything pasted keeps its place and size
+    boxes = []
+    for s in shapes:
+        off, ext = s.find(f".//{{{_A}}}xfrm/{{{_A}}}off"), s.find(f".//{{{_A}}}xfrm/{{{_A}}}ext")
+        if off is not None and ext is not None:
+            x, y = int(off.get("x")), int(off.get("y"))
+            boxes.append((x, y, x + int(ext.get("cx")), y + int(ext.get("cy"))))
+    x0, y0 = min(b[0] for b in boxes), min(b[1] for b in boxes)
+    w, h = max(1, max(b[2] for b in boxes) - x0), max(1, max(b[3] for b in boxes) - y0)
+    graphic = etree.Element(f"{{{_A}}}graphic", nsmap={"a": _A})
+    data = etree.SubElement(graphic, f"{{{_A}}}graphicData", uri=_LC)
+    canvas = etree.SubElement(data, f"{{{_LC}}}lockedCanvas", nsmap={"lc": _LC})
+    nv = etree.SubElement(canvas, f"{{{_A}}}nvGrpSpPr")
+    etree.SubElement(nv, f"{{{_A}}}cNvPr", id="0", name="")
+    etree.SubElement(nv, f"{{{_A}}}cNvGrpSpPr")
+    xfrm = etree.SubElement(etree.SubElement(canvas, f"{{{_A}}}grpSpPr"), f"{{{_A}}}xfrm")
+    etree.SubElement(xfrm, f"{{{_A}}}off", x="0", y="0")
+    etree.SubElement(xfrm, f"{{{_A}}}ext", cx=str(w), cy=str(h))
+    etree.SubElement(xfrm, f"{{{_A}}}chOff", x=str(x0), y=str(y0))
+    etree.SubElement(xfrm, f"{{{_A}}}chExt", cx=str(w), cy=str(h))
+    canvas.extend(shapes)
+    theme_xml = pb.prs.slide_masters[0].part.part_related_by(RT.THEME).blob
+    rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    drawing_rels = [f'<Relationship Id="rId1" Type="{rel}/theme" Target="../theme/theme1.xml"/>'] + [
+        f'<Relationship Id="{rid}" Type="{rel}/image" Target="../media/{name}"/>' for rid, name, _ in media_parts.values()]
+    types = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif", "bmp": "image/bmp",
+             "tif": "image/tiff", "tiff": "image/tiff", "emf": "image/x-emf", "wmf": "image/x-wmf"}
+    head = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    out = io.BytesIO()
+    import zipfile
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", head + (
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            + "".join(f'<Default Extension="{e}" ContentType="{types.get(e, "image/" + e)}"/>' for e in sorted(exts))
+            + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/clipboard/drawings/drawing1.xml" '
+            'ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>'
+            '<Override PartName="/clipboard/theme/theme1.xml" '
+            'ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/></Types>'))
+        z.writestr("_rels/.rels", head + (
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            f'<Relationship Id="rId1" Type="{rel}/drawing" Target="clipboard/drawings/drawing1.xml"/></Relationships>'))
+        z.writestr("clipboard/drawings/drawing1.xml",
+                   etree.tostring(graphic, xml_declaration=True, encoding="UTF-8", standalone=True))
+        z.writestr("clipboard/drawings/_rels/drawing1.xml.rels", head + (
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            + "".join(drawing_rels) + "</Relationships>"))
+        z.writestr("clipboard/theme/theme1.xml", theme_xml)
+        for _, name, blob in media_parts.values():
+            z.writestr(f"clipboard/media/{name}", blob)
+    return out.getvalue()
 
 
 def export_pptx(path, board_ids, overview=True, order="position", only_ids=None, editable=True, progress=None):

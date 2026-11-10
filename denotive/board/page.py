@@ -787,7 +787,8 @@ class BoardPage(QWidget):
         ring.setZValue(2_000_000)
         ring.setBrush(Qt.NoBrush)
         self.scene.addItem(ring)
-        anim = QVariantAnimation(self)
+        # owned by the board's scene: switching boards mid-glow deletes the animation along with the ring
+        anim = QVariantAnimation(self.scene)
         anim.setStartValue(0.0)
         anim.setEndValue(1.0)
         anim.setDuration(900)
@@ -973,6 +974,8 @@ class BoardPage(QWidget):
     def _fill_more(self):
         m = self.more_menu
         m.clear()
+        m.addAction(theme.icon("newwindow", 16), "Open in new window",
+                    lambda: self.main.open_in_new_window(self.board["id"]))
         m.addAction(theme.icon("coinv", 16, theme.COINV), "Ask the Co-Investigator…", self.ask_coinv)
         m.addAction(theme.icon("copy", 16), "Copy case file (for any AI)", self.coinv.copy_case)
         m.addAction(theme.icon("download", 16), "Save case file…", self.coinv.save_case)

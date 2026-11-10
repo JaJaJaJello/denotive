@@ -84,7 +84,7 @@ class Store:
         self.db = sqlite3.connect(str(self.db_path), isolation_level=None, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         for pragma in ("journal_mode=WAL", "synchronous=NORMAL", "temp_store=MEMORY", "cache_size=-32000",
-                       "foreign_keys=OFF"):
+                       "foreign_keys=OFF", "busy_timeout=5000"):  # a second window waits its turn to write
             self.db.execute("PRAGMA " + pragma)
         self.db.executescript(SCHEMA)
         self._migrate()
@@ -100,6 +100,24 @@ class Store:
             # a linked copy shows another item's evidence/file and shares its versions
             self.db.execute("ALTER TABLE items ADD COLUMN link_of TEXT")
         self.db.execute("CREATE INDEX IF NOT EXISTS items_link ON items(link_of)")
+
+    def data_version(self):
+        """Changes whenever another connection (another DeNotive window) commits to the library."""
+        return self.db.execute("PRAGMA data_version").fetchone()[0]
+
+    def board_fingerprint(self, bid):
+        """Changes when anything on the board does (items, strings, the board itself)."""
+        items = self.q("SELECT id, x, y, w, h, z, data, title, ver, vnum, deleted, link_of FROM items "
+                       "WHERE board_id=? ORDER BY id", (bid,))
+        conns = self.q("SELECT id, src, dst, label, data, deleted FROM connections WHERE board_id=? ORDER BY id", (bid,))
+        b = self.q1("SELECT name, background, data, deleted FROM boards WHERE id=?", (bid,))
+        return hash((tuple(map(tuple, items)), tuple(map(tuple, conns)), tuple(b) if b else None))
+
+    def library_fingerprint(self):
+        """Changes when projects or boards are added, renamed, moved, recoloured or deleted."""
+        p = self.q("SELECT id, name, color, sort, deleted FROM projects ORDER BY id")
+        b = self.q("SELECT id, project_id, name, sort, deleted, kind FROM boards ORDER BY id")
+        return hash((tuple(map(tuple, p)), tuple(map(tuple, b))))
 
     def close(self):
         try:

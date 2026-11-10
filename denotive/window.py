@@ -1,9 +1,11 @@
 """Main window: sidebar + page stack (home, board, evidence editor, timeline, trash) + search palette."""
 import os
+import subprocess
+import sys
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QTimer, Qt
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtCore import QByteArray, QPoint, QTimer, Qt
+from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtPrintSupport import QPrinter, QPrintPreviewDialog
 from PySide6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QMainWindow, QMessageBox, QSplitter,
                                QStackedWidget, QWidget)
@@ -22,8 +24,10 @@ from .widgets.trash import TrashPage
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, window_board=None):
         super().__init__()
+        # a second window opened on a board ("Open in new window"): it leaves the main window's state alone
+        self.secondary = bool(window_board)
         self.setWindowTitle("DeNotive")
         self.setMinimumSize(1060, 660)
         self.resize(1560, 940)
@@ -79,9 +83,22 @@ class MainWindow(QMainWindow):
         geo = settings.get("geometry")
         if geo:
             self.restoreGeometry(QByteArray.fromHex(geo.encode()))
+        if self.secondary:
+            self._place_on_other_screen()
         sizes = settings.get("sidebar_sizes")
         if sizes:
             self.split.setSizes(sizes)
+        # another DeNotive window may change the library: keep what's on screen current
+        self._seen_version = context.store.data_version()
+        self._lib_fp = context.store.library_fingerprint()
+        self._board_fp = None
+        self._sync_timer = QTimer(self)
+        self._sync_timer.setInterval(1500)
+        self._sync_timer.timeout.connect(self._check_outside_changes)
+        self._sync_timer.start()
+        if window_board and context.store.board(window_board):
+            self.open_board(window_board, fit=True)
+            return
         last = settings.get("last_board")
         b = context.store.board(last) if last else None
         if b and not b.get("deleted") and context.store.project(b["project_id"]) and \
@@ -100,6 +117,8 @@ class MainWindow(QMainWindow):
             from .settings import DEFAULT_LIBRARY
             st = context.open_library(DEFAULT_LIBRARY)
             settings.set("library", str(DEFAULT_LIBRARY))
+        if self.secondary:
+            return
         st.daily_backup()
         if not st.projects() and not st.meta("seeded"):
             from .seed import create_welcome
@@ -191,12 +210,81 @@ class MainWindow(QMainWindow):
         else:
             self.sidebar.select_board(board_id)
             self.setWindowTitle(f"{bp.board['name']} — DeNotive")
-        settings.set("last_board", board_id)
+        if not self.secondary:
+            settings.set("last_board", board_id)
+        self._baseline()
         bp.view.setFocus()
 
     def open_project_map(self, project_id, fit=True):
         m = context.store.project_map(project_id)
         self.open_board(m["id"], fit=fit)
+
+    # ------------------------------------------------------------------ more than one window
+    def open_in_new_window(self, board_id):
+        """Opens a board (or a project map) in a second DeNotive window, e.g. on the other screen."""
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable]
+        else:
+            exe = Path(sys.executable)
+            quiet = exe.with_name("pythonw.exe")
+            cmd = [str(quiet if quiet.exists() else exe), str(Path(__file__).resolve().parent.parent / "run.py")]
+        try:
+            subprocess.Popen(cmd + ["--window", board_id], close_fds=True)
+            self.toast("Opening in a new window…")
+        except OSError as ex:
+            QMessageBox.warning(self, "DeNotive", f"Couldn't open a new window:\n{ex}")
+
+    def _place_on_other_screen(self):
+        """A second window opens on another screen when there is one, else just offset from the first."""
+        self.setWindowState(Qt.WindowNoState)
+        here = QGuiApplication.screenAt(self.geometry().center()) or QGuiApplication.primaryScreen()
+        other = next((s for s in QGuiApplication.screens() if s is not here), None)
+        if other is not None:
+            self.setGeometry(other.availableGeometry().adjusted(30, 30, -30, -30))
+        else:
+            self.move(self.pos() + QPoint(60, 60))
+
+    def _check_outside_changes(self):
+        """If another window wrote to the library, refresh what's showing. Never writes, so windows don't echo."""
+        st = context.store
+        v = st.data_version()
+        if v == self._seen_version:
+            return
+        bp = self.board_page
+        busy = (QApplication.mouseButtons() != Qt.NoButton or QApplication.activePopupWidget() is not None
+                or QApplication.activeModalWidget() is not None or self.stack.currentWidget() is self.editor
+                or (bp.scene is not None and bp.view._editing_text()))
+        if busy:
+            return  # try again on the next tick
+        self._seen_version = v
+        lib = st.library_fingerprint()
+        if lib != self._lib_fp:
+            self._lib_fp = lib
+            self.sidebar.rebuild()
+            self.sidebar.update_counts()
+            if bp.board is not None and not st.is_map(bp.board):
+                self.sidebar.select_board(bp.board["id"])
+        if bp.board is None or bp.scene is None:
+            return
+        b = st.board(bp.board["id"])
+        if b is None or b.get("deleted"):
+            bp.close_board()
+            self.go_home()
+            return
+        fp = st.board_fingerprint(b["id"])
+        if fp != self._board_fp:
+            view = bp.view.view_state()
+            selected = {i.id for i in bp.scene.selected_board_items()}
+            bp.open_board(b["id"])
+
+            def restore():
+                bp.view.restore_state(view)
+                for iid in selected:
+                    it = bp.scene.items_by_id.get(iid) if bp.scene else None
+                    if it is not None:
+                        it.setSelected(True)
+            QTimer.singleShot(0, restore)
+        self._board_fp = fp
 
     def new_board_here(self):
         bp = self.board_page
@@ -452,6 +540,11 @@ class MainWindow(QMainWindow):
 
     def board_changed(self):
         self._counts_timer.start()
+        self._baseline()  # our own change isn't news to us
+
+    def _baseline(self):
+        bp = self.board_page
+        self._board_fp = context.store.board_fingerprint(bp.board["id"]) if bp.board is not None else None
 
     def board_meta_changed(self):
         bp = self.board_page
@@ -501,9 +594,10 @@ class MainWindow(QMainWindow):
             e.ignore()
             return
         self.board_page.save_view_state()
-        settings["geometry"] = bytes(self.saveGeometry().toHex()).decode()
-        settings["sidebar_sizes"] = self.split.sizes()
-        settings.save()
+        if not self.secondary:
+            settings["geometry"] = bytes(self.saveGeometry().toHex()).decode()
+            settings["sidebar_sizes"] = self.split.sizes()
+            settings.save()
         if self.board_page.scene is not None:
             self.board_page.scene.teardown()
         context.store.close()

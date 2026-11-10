@@ -7,7 +7,7 @@ write so version bookkeeping (titles, thumbnails) is never clobbered by an older
 import time
 from collections import defaultdict
 
-from PySide6.QtCore import QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtWidgets import QGraphicsScene
 
 from .. import context, textmarks
@@ -241,6 +241,47 @@ class BoardScene(QGraphicsScene):
 
     def commit_geometry(self, items, befores):
         self.commit([("item", b) for b in befores], [("item", it.current_row()) for it in items], "Resize")
+
+    def begin_group_scale(self, grabbed):
+        """Dragging the corner grip of one of several selected items scales the whole selection about its
+        top-left corner: positions, sizes and text sizes together, so the arrangement keeps its shape."""
+        members = []
+        box = QRectF()
+        for it in self.selected_board_items():
+            r = it.current_row()
+            box = box.united(it.scene_rect()) if not box.isNull() else QRectF(it.scene_rect())
+            members.append({"it": it, "before": dict(r, data=dict(r.get("data") or {})), "pos": QPointF(it.pos()),
+                            "w": it.w, "h": it.h, "p2": QPointF(it.p2) if isinstance(it, LineItem) else None,
+                            "size": it.data.get("size") if isinstance(it, TextHolder) else None})
+        smin = max([0.1] + [m["it"].MIN_W / max(1.0, m["w"]) for m in members if m["it"].RESIZABLE])
+        return {"members": members, "origin": box.topLeft(), "start": grabbed.mapToScene(QPointF(grabbed.w, grabbed.h)),
+                "smin": smin}
+
+    def update_group_scale(self, g, pos):
+        o, start = g["origin"], g["start"]
+        dx, dy = start.x() - o.x(), start.y() - o.y()
+        s = max((pos.x() - o.x()) / dx if dx > 1 else 0.0, (pos.y() - o.y()) / dy if dy > 1 else 0.0)
+        s = max(g["smin"], s)
+        for m in g["members"]:
+            it = m["it"]
+            it.prepareGeometryChange()
+            it.setPos(o + (m["pos"] - o) * s)
+            if m["p2"] is not None:  # lines: the far end scales too
+                it.p2 = m["p2"] * s
+            else:
+                if m["size"]:
+                    it.data["size"] = max(6, round(float(m["size"]) * s))
+                w = m["w"] * s
+                hw = it.height_for_width(w)
+                it.w, it.h = w, (hw if hw is not None else m["h"] * s)
+                it.on_resized()
+            for st in it.strings:
+                st.update_path()
+            it.update()
+
+    def end_group_scale(self, g):
+        self._press_geo = None  # one undo step: the resize already holds the old positions
+        self.commit_geometry([m["it"] for m in g["members"]], [m["before"] for m in g["members"]])
 
     def update_items(self, items, fn, label="Style"):
         """fn(row) mutates a copy of each item's row (usually its data dict)."""

@@ -536,11 +536,11 @@ class Inspector(QScrollArea):
             lambda c: self._char(lambda f: f.setBackground(QColor(c)) if c else f.clearBackground()))
         for b in (self.b_bold, self.b_ital, self.b_under, self.b_strike):
             b.setFocusPolicy(Qt.NoFocus)
-        s.row(self.b_bold, self.b_ital, self.b_under, self.b_strike, self.fg, self.hl)
         self.al = {}
         row = []
-        for key, glyph in (("left", "alignleft"), ("center", "aligncenter"), ("right", "alignright")):
-            b = tool_button(glyph, f"Align {key}", True, 16)
+        for key, glyph in (("left", "alignleft"), ("center", "aligncenter"), ("right", "alignright"),
+                           ("justify", "alignjustify")):
+            b = tool_button(glyph, "Justify (both edges straight)" if key == "justify" else f"Align {key}", True, 16)
             b.setFocusPolicy(Qt.NoFocus)
             b.clicked.connect(lambda _=False, k=key: self._align_text(k))
             self.al[key] = b
@@ -557,7 +557,17 @@ class Inspector(QScrollArea):
         self.b_sub.clicked.connect(lambda: self.page.set_script("sub"))
         for b in (self.b_sup, self.b_sub):
             b.setFocusPolicy(Qt.NoFocus)
-        s.row(*row, vsep(18), bl, nl, vsep(18), self.b_sup, self.b_sub)
+        s.row(self.b_bold, self.b_ital, self.b_under, self.b_strike, vsep(18), self.b_sup, self.b_sub)
+        s.row(self.fg, self.hl, vsep(18), *row)
+        self.cols = QSpinBox()
+        self.cols.setRange(1, 6)
+        self.cols.setFixedWidth(56)
+        self.cols.setToolTip("Text flows down one column and into the next")
+        self.cols.valueChanged.connect(lambda v: self._attr("cols", v, types=(SlideText,)))
+        self.col_gap = spin(0, 200, 2, 0, " px", 74)
+        self.col_gap.setToolTip("Space between columns")
+        self.col_gap.valueChanged.connect(lambda v: self._attr("col_gap", v, types=(SlideText,)))
+        self.cols_row = s.row(bl, nl, vsep(18), label("Columns", "Muted"), self.cols, self.col_gap)
         # ---- fill / border
         s = self.sec_fill = Section("Fill & border")
         self.shape_kind = QComboBox()
@@ -890,7 +900,7 @@ class Inspector(QScrollArea):
 
     def _align_text(self, key):
         targets, editing = self._text_targets()
-        al = {"left": Qt.AlignLeft, "center": Qt.AlignHCenter, "right": Qt.AlignRight}[key]
+        al = {"left": Qt.AlignLeft, "center": Qt.AlignHCenter, "right": Qt.AlignRight, "justify": Qt.AlignJustify}[key]
         for it in targets:
             c = it.text.textCursor() if editing else QTextCursor(it.text.document())
             if not editing:
@@ -1008,6 +1018,12 @@ class Inspector(QScrollArea):
             self.sec_ink.setVisible(any(isinstance(i, SlideStroke) for i in sel) or
                                     (not sel and sc.tool in ("pen", "highlighter")))
             self.sec_img.setVisible(any(isinstance(i, SlideImage) for i in sel))
+            boxes = [i for i in text_items if isinstance(i, SlideText) and not i.code]
+            for w in (self.cols, self.col_gap):
+                w.setEnabled(bool(boxes))
+            if boxes:
+                self.cols.setValue(boxes[0].cols)
+                self.col_gap.setValue(boxes[0].col_gap)
             zooms = [i for i in sel if isinstance(i, SlideZoom)]
             self.sec_zoom.setVisible(bool(zooms))
             if zooms:
@@ -1048,7 +1064,8 @@ class Inspector(QScrollArea):
                 a = blk.alignment()
                 if isinstance(it, SlideShape) and not (blk.hasProperty(QTextFormat.BlockAlignment)):
                     a = Qt.AlignHCenter
-                key = "center" if a & Qt.AlignHCenter else "right" if a & Qt.AlignRight else "left"
+                key = ("justify" if a & Qt.AlignJustify else "center" if a & Qt.AlignHCenter else
+                       "right" if a & Qt.AlignRight else "left")
                 for k, b in self.al.items():
                     b.setChecked(k == key)
             elif not sel:
@@ -1081,9 +1098,11 @@ class Inspector(QScrollArea):
                 for key, (state, b) in self.end_rows.items():
                     g = getattr(ln, key)
                     t = sc.item_by_uid(g.get("id")) if g else None
-                    state.setText(f"on {t.label()[:22]}" if t else "free")
+                    gap = (g or {}).get("gap") or 0
+                    state.setText((f"on {t.label()[:18]}" + (f", {gap:.0f} px short" if gap else "")) if t else "free")
                     b.setText("Detach" if g else "Attach…")
-                    b.setToolTip("Let go of the object" if g else
+                    b.setToolTip("Let go of the object. Tip: Ctrl+drag a stuck end to stop it short of its spot "
+                                 "while still pointing at it" if g else
                                  "Then click an object: this end stays pinned to it, right where it is now")
                     b.setEnabled(len(lines) == 1)
             inks = [i for i in sel if isinstance(i, SlideStroke)]
@@ -1768,10 +1787,24 @@ class EditorPage(QWidget):
             return
         from PySide6.QtCore import QMimeData
         md = QMimeData()
-        md.setData(SLIDE_MIME, json.dumps([i.to_dict() for i in sel]).encode())
+        dicts = [i.to_dict() for i in sel]
+        md.setData(SLIDE_MIME, json.dumps(dicts).encode())
         txt = "\n".join(i.text_content() for i in sel if i.text_content())
         if txt:
             md.setText(txt)
+        sc = self.scene
+        # for PowerPoint, Word, Excel: real shapes, text boxes, pictures and lines, placed as on the slide's page
+        top = sc.page_top(sc.page_at(sc._union(sel).center().y()))
+        doc = dict(sc.to_doc(), items=[dict(d, y=d.get("y", 0) - top) for d in sc.to_doc()["items"]])
+        try:
+            from ..export import GVML_MIME, office_clipboard
+            gvml = office_clipboard([dict(d, y=d.get("y", 0) - top) for d in dicts], doc)
+            if gvml:
+                md.setData(GVML_MIME, gvml)
+        except Exception:
+            import traceback
+            traceback.print_exc()  # the other formats still go on the clipboard
+        md.setImageData(sc.picture_of(sel))  # anything else gets a picture
         QApplication.clipboard().setMimeData(md)
 
     def paste(self):

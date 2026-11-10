@@ -94,6 +94,7 @@ class BoardItem(QGraphicsObject):
         self.row = {}
         self.w = self.h = 0.0
         self._resize = None
+        self._group = None  # scaling the whole selection from this item's grip
         self._hover = False
         self._carry = []
         self.setFlags(QGraphicsItem.ItemIsMovable | QGraphicsItem.ItemIsSelectable |
@@ -235,8 +236,11 @@ class BoardItem(QGraphicsObject):
         sc = self.scene()
         if e.button() == Qt.LeftButton and sc is not None:
             p = e.pos()
-            if self.RESIZABLE and self.isSelected() and self.grip_rect().contains(p) and len(sc.selectedItems()) == 1:
-                self._resize = (e.scenePos(), self.w, self.h, self.current_row())
+            if self.RESIZABLE and self.isSelected() and self.grip_rect().contains(p):
+                if len(sc.selected_board_items()) > 1:  # several selected: they scale together
+                    self._group = sc.begin_group_scale(self)
+                else:
+                    self._resize = (e.scenePos(), self.w, self.h, self.current_row())
                 e.accept()
                 return
             if (self.pin_visible() and self.pin_hit(p)) or sc.tool == "string" or e.modifiers() & Qt.AltModifier:
@@ -248,6 +252,10 @@ class BoardItem(QGraphicsObject):
 
     def mouseMoveEvent(self, e):
         sc = self.scene()
+        if self._group is not None:
+            sc.update_group_scale(self._group, e.scenePos())
+            e.accept()
+            return
         if self._resize is not None:
             start, w0, h0, _ = self._resize
             d = e.scenePos() - start
@@ -273,6 +281,12 @@ class BoardItem(QGraphicsObject):
     def mouseReleaseEvent(self, e):
         sc = self.scene()
         self._carry = []
+        if self._group is not None:
+            g, self._group = self._group, None
+            if sc is not None:
+                sc.end_group_scale(g)
+            e.accept()
+            return
         if self._resize is not None:
             before = self._resize[3]
             self._resize = None

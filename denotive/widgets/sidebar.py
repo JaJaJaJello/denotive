@@ -361,6 +361,8 @@ class Sidebar(QWidget):
         elif item.data(0, ROLE_KIND) == "project":
             pid = item.data(0, ROLE_ID)
             m.addAction(theme.icon("board", 16), "Project map", lambda: self.main.open_project_map(pid))
+            m.addAction(theme.icon("newwindow", 16), "Open map in new window",
+                        lambda: self.main.open_in_new_window(st.project_map(pid)["id"]))
             m.addAction(theme.icon("add", 16), "New board…", lambda: self.new_board(pid))
             m.addAction(theme.icon("edit", 16), "Rename…", lambda: self._rename("project", pid, item.text(0)))
             col = m.addMenu(theme.icon("palette", 16), "Colour")
@@ -380,6 +382,7 @@ class Sidebar(QWidget):
         else:
             bid = item.data(0, ROLE_ID)
             m.addAction(theme.icon("board", 16), "Open", lambda: self.board_selected.emit(bid))
+            m.addAction(theme.icon("newwindow", 16), "Open in new window", lambda: self.main.open_in_new_window(bid))
             m.addAction(theme.icon("edit", 16), "Rename…", lambda: self._rename("board", bid, item.text(0)))
             mv = m.addMenu(theme.icon("forward", 16), "Move to project")
             cur = item.parent().data(0, ROLE_ID)

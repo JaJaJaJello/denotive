@@ -7,7 +7,8 @@ import math
 import uuid
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPainterPathStroker, QPen, QTextDocument, QTextOption
+from PySide6.QtGui import (QAbstractTextDocumentLayout, QColor, QFont, QPainter, QPainterPath, QPainterPathStroker,
+                           QPalette, QPen, QTextDocument, QTextOption)
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsObject, QGraphicsTextItem
 
 from .. import context, geometry
@@ -280,6 +281,38 @@ class TextBearing(SlideItem):
             sc.update()
 
 
+def column_breaks(doc, n):
+    """Splits a laid-out document into n balanced columns, only ever between lines: [(top, bottom), ...]."""
+    lay = doc.documentLayout()
+    lines = []
+    b = doc.begin()
+    while b.isValid():
+        top = lay.blockBoundingRect(b).top()
+        tl = b.layout()
+        for i in range(tl.lineCount()):
+            ln = tl.lineAt(i)
+            lines.append((top + ln.y(), top + ln.y() + ln.height()))
+        b = b.next()
+    if not lines:
+        return [(0.0, doc.size().height())]
+    lines.sort()
+
+    def pack(height):
+        cols, start, end = [], lines[0][0], lines[0][0]
+        for a, z in lines:
+            if z - start > height + 0.01 and end > start:
+                cols.append((start, end))
+                start = a
+            end = z
+        return cols + [(start, end)]
+
+    lo, hi = max(z - a for a, z in lines), lines[-1][1] - lines[0][0]
+    for _ in range(30):  # the shortest column height that fits in n columns
+        mid = (lo + hi) / 2
+        lo, hi = (lo, mid) if len(pack(mid)) <= n else (mid, hi)
+    return pack(hi)
+
+
 class SlideText(TextBearing):
     TYPE = "text"
 
@@ -292,6 +325,9 @@ class SlideText(TextBearing):
         self.pad = float(d.get("pad", 6))
         self.min_h = float(d.get("minh", 24))
         self.code = bool(d.get("code", False))
+        self.cols = max(1, int(d.get("cols", 1) or 1))  # text flowing in side-by-side columns
+        self.col_gap = float(d.get("colgap", 24))
+        self._breaks = None
         self.init_text(d, "#1d1f24", 24)
         if self.code:
             self.text.set_code(True)
@@ -305,12 +341,35 @@ class SlideText(TextBearing):
         self.min_h = max(12.0, float(h))
         super().set_size(w, h)
 
+    def columns(self):
+        """How many columns to show: one while being typed in, so the cursor works as usual."""
+        sc = self.scene()
+        editing = sc is not None and getattr(sc, "editing", None) is self
+        return 1 if self.code or editing else self.cols
+
+    def doc_point(self, local):
+        """Where a point on the box falls in the text, allowing for columns."""
+        if not self._breaks:
+            return local - QPointF(self.pad, self.pad)
+        colw = self.text.textWidth()
+        i = int(max(0, min(len(self._breaks) - 1, (local.x() - self.pad) // (colw + self.col_gap))))
+        return QPointF(local.x() - self.pad - i * (colw + self.col_gap), self._breaks[i][0] + local.y() - self.pad)
+
     def layout_children(self):
         if not hasattr(self, "text"):
             return
-        self.text.setTextWidth(max(10.0, self.w - 2 * self.pad))
+        n = self.columns()
+        width_cols = 1 if self.code else self.cols  # typing keeps the column width, so lines wrap the same
+        inner = max(10.0, self.w - 2 * self.pad)
+        self.text.setTextWidth(max(10.0, (inner - (width_cols - 1) * self.col_gap) / width_cols))
         self.text.setPos(self.pad, self.pad)
         doc_h = self.text.boundingRect().height()
+        if n > 1:
+            self._breaks = column_breaks(self.text.document(), n)
+            doc_h = max(z - a for a, z in self._breaks) + 4
+        else:
+            self._breaks = None
+        self.text.setVisible(n == 1)  # with columns, paint() draws the text itself
         new_h = max(self.min_h, doc_h + 2 * self.pad)
         if abs(new_h - self.h) > 0.01:
             self.prepareGeometryChange()
@@ -328,6 +387,17 @@ class SlideText(TextBearing):
             p.setBrush(QColor(self.fill) if self.fill else Qt.NoBrush)
             inset = self.sw / 2 if self.stroke else 0
             p.drawRoundedRect(r.adjusted(inset, inset, -inset, -inset), self.radius, self.radius)
+        if self._breaks:
+            ctx = QAbstractTextDocumentLayout.PaintContext()
+            ctx.palette.setColor(QPalette.Text, QColor(self.color))
+            colw = self.text.textWidth()
+            for i, (a, z) in enumerate(self._breaks):
+                p.save()
+                p.translate(self.pad + i * (colw + self.col_gap), self.pad - a)
+                ctx.clip = QRectF(0, a, colw + 2, z - a)
+                p.setClipRect(ctx.clip, Qt.IntersectClip)
+                self.text.document().documentLayout().draw(p, ctx)
+                p.restore()
         if not rendering:
             editing = getattr(sc, "editing", None) is self
             empty = self.text.document().isEmpty()
@@ -350,6 +420,8 @@ class SlideText(TextBearing):
         d.update(self.text_dict())
         d.update(fill=self.fill, stroke=self.stroke, sw=self.sw, radius=self.radius, pad=self.pad,
                  minh=self.min_h, code=self.code)
+        if self.cols > 1:
+            d.update(cols=self.cols, colgap=self.col_gap)
         return d
 
 
