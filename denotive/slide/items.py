@@ -7,8 +7,8 @@ import math
 import uuid
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import (QAbstractTextDocumentLayout, QColor, QFont, QPainter, QPainterPath, QPainterPathStroker,
-                           QPalette, QPen, QTextDocument, QTextOption)
+from PySide6.QtGui import (QAbstractTextDocumentLayout, QBrush, QColor, QFont, QGradient, QLinearGradient, QPainter,
+                           QPainterPath, QPainterPathStroker, QPalette, QPen, QTextDocument, QTextOption, QTransform)
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsObject, QGraphicsTextItem
 
 from .. import context, geometry
@@ -84,6 +84,75 @@ def make_pen(color, width, dash="solid", cap=Qt.RoundCap):
     if not color or not width or width <= 0:
         return QPen(Qt.NoPen)
     return QPen(QColor(color), width, DASHES.get(dash, Qt.SolidLine), cap, Qt.RoundJoin)
+
+
+# ---------------------------------------------------------------------- gradient fills
+# grad = {"c": [fx, fy]  centre as a fraction of the item's width / height,
+#         "ang": degrees  direction of the colour change in the item's own coordinates (0 = left to right,
+#                         90 = top to bottom, i.e. clockwise on screen); it turns along with the item,
+#         "a", "b":       where the start and end colours sit, as distances from the centre along that
+#                         direction, in units of half the box's length measured that way (so -1 and 1 put
+#                         them on the box's edges when centred); before "a" it's all c1, after "b" all c2,
+#         "c1", "c2":     the start and end colours}
+# Everything is relative to the box, so the gradient stretches with the item when it is resized.
+def grad_geom(g, w, h):
+    """(centre, (dx, dy) unit direction, unit length, start point, end point) in item coordinates. The unit is
+    half the box's length along the direction, so stretching the box stretches the gradient with it."""
+    cx, cy = float(g["c"][0]) * w, float(g["c"][1]) * h
+    t = math.radians(float(g["ang"]))
+    dx, dy = math.cos(t), math.sin(t)
+    L = max(1.0, (abs(w * dx) + abs(h * dy)) / 2)
+    a, b = float(g["a"]) * L, float(g["b"]) * L
+    return QPointF(cx, cy), (dx, dy), L, QPointF(cx + a * dx, cy + a * dy), QPointF(cx + b * dx, cy + b * dy)
+
+
+def default_grad(fill, w, h, ang=90.0):
+    """A gradient from the current fill to white (or to a darker shade when the fill is already pale),
+    centred, top to bottom, running edge to edge."""
+    c1 = QColor(fill or "#5b8cff")
+    pale = 0.299 * c1.red() + 0.587 * c1.green() + 0.114 * c1.blue() > 200
+    c2 = c1.darker(150) if pale else QColor("#ffffff")
+    if c1.alpha() < 255:
+        c2.setAlpha(c1.alpha())
+    return {"c": [0.5, 0.5], "ang": float(ang), "a": -1.0, "b": 1.0, "c1": _hex(c1), "c2": _hex(c2)}
+
+
+def _hex(c):
+    return c.name(QColor.HexArgb) if c.alpha() < 255 else c.name()
+
+
+def clean_grad(g):
+    """A gradient dict with every key present and sane, or None."""
+    if not isinstance(g, dict):
+        return None
+    try:
+        c = g.get("c") or [0.5, 0.5]
+        out = {"c": [float(c[0]), float(c[1])], "ang": float(g.get("ang", 90.0)) % 360,
+               "a": float(g.get("a", -1.0)), "b": float(g.get("b", 1.0)),
+               "c1": str(g.get("c1") or "#5b8cff"), "c2": str(g.get("c2") or "#ffffff")}
+    except (TypeError, ValueError, IndexError):
+        return None
+    if abs(out["b"] - out["a"]) < 1e-4:
+        out["b"] = out["a"] + 1e-4
+    return out
+
+
+def grad_brush(g, w, h):
+    _, _, _, p1, p2 = grad_geom(g, w, h)
+    lg = QLinearGradient(p1, p2)
+    lg.setSpread(QGradient.PadSpread)  # solid start colour before the first line, end colour after the second
+    lg.setColorAt(0.0, QColor(g["c1"]))
+    lg.setColorAt(1.0, QColor(g["c2"]))
+    return QBrush(lg)
+
+
+def grad_color_at(g, t):
+    """The colour at fraction t between the start (0) and end (1) lines, padded outside them."""
+    t = max(0.0, min(1.0, t))
+    a, b = QColor(g["c1"]), QColor(g["c2"])
+    mix = QColor(round(a.red() + (b.red() - a.red()) * t), round(a.green() + (b.green() - a.green()) * t),
+                 round(a.blue() + (b.blue() - a.blue()) * t), round(a.alpha() + (b.alpha() - a.alpha()) * t))
+    return _hex(mix)
 
 
 def html_to_plain(html: str) -> str:
@@ -210,6 +279,23 @@ class SlideItem(QGraphicsObject):
             self._moved()
         return super().itemChange(change, value)
 
+    def fill_brush(self):
+        """The fill: a gradient when the item has one, otherwise its solid colour (or nothing)."""
+        if not getattr(self, "fill", None):
+            return QBrush(Qt.NoBrush)
+        g = getattr(self, "grad", None)
+        if g:
+            return grad_brush(g, self.w, self.h)
+        return QBrush(QColor(self.fill))
+
+    def set_grad(self, g):
+        """Turns a gradient on (a dict) or off (None). The solid fill follows the start colour, so an item with a
+        gradient always counts as filled."""
+        self.grad = clean_grad(g)
+        if self.grad:
+            self.fill = self.grad["c1"]
+        self.update()
+
     def paint_shadow(self, p, path):
         p.save()
         p.setPen(Qt.NoPen)
@@ -319,6 +405,7 @@ class SlideText(TextBearing):
     def __init__(self, d):
         super().__init__(d)
         self.fill = d.get("fill")
+        self.grad = clean_grad(d.get("grad")) if self.fill else None
         self.stroke = d.get("stroke")
         self.sw = float(d.get("sw", 0))
         self.radius = float(d.get("radius", 0))
@@ -384,7 +471,7 @@ class SlideText(TextBearing):
         if self.fill or (self.stroke and self.sw > 0):
             p.setRenderHint(QPainter.Antialiasing)
             p.setPen(make_pen(self.stroke, self.sw))
-            p.setBrush(QColor(self.fill) if self.fill else Qt.NoBrush)
+            p.setBrush(self.fill_brush())
             inset = self.sw / 2 if self.stroke else 0
             p.drawRoundedRect(r.adjusted(inset, inset, -inset, -inset), self.radius, self.radius)
         if self._breaks:
@@ -420,6 +507,8 @@ class SlideText(TextBearing):
         d.update(self.text_dict())
         d.update(fill=self.fill, stroke=self.stroke, sw=self.sw, radius=self.radius, pad=self.pad,
                  minh=self.min_h, code=self.code)
+        if self.grad and self.fill:
+            d["grad"] = dict(self.grad)
         if self.cols > 1:
             d.update(cols=self.cols, colgap=self.col_gap)
         return d
@@ -432,6 +521,7 @@ class SlideShape(TextBearing):
         super().__init__(d)
         self.shape_kind = d.get("shape", "rect")
         self.fill = d.get("fill", "#5b8cff")
+        self.grad = clean_grad(d.get("grad")) if self.fill else None
         self.stroke = d.get("stroke")
         self.sw = float(d.get("sw", 0))
         self.dash = d.get("dash", "solid")
@@ -473,7 +563,7 @@ class SlideShape(TextBearing):
         if self.shadow:
             self.paint_shadow(p, path)
         p.setPen(make_pen(self.stroke, self.sw, self.dash))
-        p.setBrush(QColor(self.fill) if self.fill else Qt.NoBrush)
+        p.setBrush(self.fill_brush())
         p.drawPath(path)
 
     def to_dict(self):
@@ -481,6 +571,8 @@ class SlideShape(TextBearing):
         d.update(self.text_dict())
         d.update(shape=self.shape_kind, fill=self.fill, stroke=self.stroke, sw=self.sw, dash=self.dash,
                  radius=self.radius, shadow=self.shadow)
+        if self.grad and self.fill:
+            d["grad"] = dict(self.grad)
         return d
 
 
@@ -825,8 +917,378 @@ class SlideZoom(SlideItem):
         return d
 
 
+CAPS = {"butt": Qt.FlatCap, "round": Qt.RoundCap, "square": Qt.SquareCap}
+
+
+def qpath_to_d(qp):
+    """A QPainterPath as path segments [["M", x, y], ["L", ...], ["C", ...], ["Z"]] (closed parts get "Z")."""
+    d, i, n = [], 0, qp.elementCount()
+    start = None
+    while i < n:
+        e = qp.elementAt(i)
+        if e.isMoveTo():
+            if d and start is not None and d[-1][0] != "Z" and len(d) > 1:
+                last = d[-1]
+                if abs(last[-2] - start[0]) < 1e-6 and abs(last[-1] - start[1]) < 1e-6:
+                    d.append(["Z"])
+            d.append(["M", e.x, e.y])
+            start = (e.x, e.y)
+            i += 1
+        elif e.isLineTo():
+            d.append(["L", e.x, e.y])
+            i += 1
+        else:  # a curve: this element and the next two hold its two handles and its end
+            c2, end = qp.elementAt(i + 1), qp.elementAt(i + 2)
+            d.append(["C", e.x, e.y, c2.x, c2.y, end.x, end.y])
+            i += 3
+    if d and start is not None and d[-1][0] != "Z" and len(d) > 1:
+        last = d[-1]
+        if abs(last[-2] - start[0]) < 1e-6 and abs(last[-1] - start[1]) < 1e-6:
+            d.append(["Z"])
+    out = []
+    for k, s in enumerate(d):  # a straight hop back onto the start right before "Z" is what Z draws anyway
+        nxt = d[k + 1] if k + 1 < len(d) else None
+        if s[0] == "L" and nxt is not None and nxt[0] == "Z":
+            m = next(t for t in reversed(out) if t[0] == "M")
+            if abs(s[1] - m[1]) < 1e-6 and abs(s[2] - m[2]) < 1e-6:
+                continue
+        out.append(s)
+    return out
+
+
+def smooth_through(p, pts, closed):
+    """Adds a smooth curve passing through every point to QPainterPath p (Catmull-Rom, as cubic Béziers)."""
+    n = len(pts)
+    p.moveTo(*pts[0])
+    if n == 2:
+        p.lineTo(*pts[1])
+    else:
+        for i in range(n if closed else n - 1):
+            p0 = pts[(i - 1) % n] if (closed or i > 0) else pts[i]
+            p1, p2 = pts[i], pts[(i + 1) % n]
+            p3 = pts[(i + 2) % n] if (closed or i + 2 < n) else p2
+            p.cubicTo(p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6,
+                      p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6, p2[0], p2[1])
+    if closed:
+        p.closeSubpath()
+
+
+class SlidePath(SlideItem):
+    """A freeform vector drawing: drawn with the Freeform tool, imported from a PDF, or traced from a picture.
+    Straight and curved segments, filled and/or outlined.
+
+    d = [["M", x, y], ["L", x, y], ["C", x1, y1, x2, y2, x, y], ["Z"], ...] in the item's own coordinates at its
+    natural size w0 x h0; resizing scales the drawing, the line width stays the same. Several "M" parts can
+    share one item (e.g. all the markers of one plot series). With smooth on, straight parts are drawn as a
+    smooth curve through their corners instead."""
+    TYPE = "path"
+    radius = 0.0
+    shadow = False
+
+    def __init__(self, d):
+        super().__init__(d)
+        self.d = d.get("d") or []
+        self.w0 = float(d.get("w0") or self.w)
+        self.h0 = float(d.get("h0") or self.h)
+        self.fill = d.get("fill")
+        self.grad = clean_grad(d.get("grad")) if self.fill else None
+        self.stroke = d.get("stroke")
+        self.sw = float(d.get("sw", 1))
+        self.dash = d.get("dash", "solid")
+        self.rule = d.get("rule", "nonzero")
+        self.cap = d.get("cap", "butt")
+        self.smooth = bool(d.get("smooth", False))
+        self._path = None
+
+    @classmethod
+    def from_segments(cls, segs, **style):
+        """A path item placed around segments given in slide coordinates."""
+        xs = [v for s in segs for v in s[1::2]]
+        ys = [v for s in segs for v in s[2::2]]
+        x0, y0 = min(xs), min(ys)
+        w0, h0 = max(1.0, max(xs) - x0), max(1.0, max(ys) - y0)
+        local = [[s[0]] + [round(v - (x0 if i % 2 == 0 else y0), 3) for i, v in enumerate(s[1:])] for s in segs]
+        return dict(style, type="path", x=x0, y=y0, w=w0, h=h0, w0=w0, h0=h0, d=local)
+
+    def label(self):
+        parts = self.subpaths()
+        return "Path" + (f" ({len(parts)} parts)" if len(parts) > 1 else "")
+
+    def subpaths(self):
+        out = []
+        for s in self.d:
+            if s[0] == "M" or not out:
+                out.append([])
+            out[-1].append(s)
+        return out
+
+    def scale(self):
+        return (self.w / self.w0 if self.w0 > 1e-6 else 1.0), (self.h / self.h0 if self.h0 > 1e-6 else 1.0)
+
+    def path(self):
+        if self._path is None:
+            sx, sy = self.scale()
+            p = QPainterPath()
+            p.setFillRule(Qt.OddEvenFill if self.rule == "evenodd" else Qt.WindingFill)
+            for part in self.subpaths():
+                if self.smooth and part and all(s[0] in "MLZ" for s in part):
+                    pts = [(s[1] * sx, s[2] * sy) for s in part if s[0] != "Z"]
+                    closed = part[-1][0] == "Z"
+                    if closed and len(pts) > 2 and abs(pts[0][0] - pts[-1][0]) + abs(pts[0][1] - pts[-1][1]) < 1e-6:
+                        pts.pop()
+                    if len(pts) >= 2:
+                        smooth_through(p, pts, closed)
+                        continue
+                for s in part:
+                    v = [c * (sx if i % 2 == 0 else sy) for i, c in enumerate(s[1:])]
+                    if s[0] == "M":
+                        p.moveTo(v[0], v[1])
+                    elif s[0] == "L":
+                        p.lineTo(v[0], v[1])
+                    elif s[0] == "C":
+                        p.cubicTo(v[0], v[1], v[2], v[3], v[4], v[5])
+                    elif s[0] == "Z":
+                        p.closeSubpath()
+            self._path = p
+        return self._path
+
+    # ---- corners (for Edit points). Indices point into self.d; positions are in the item's own coordinates.
+    def _changed(self):
+        self.prepareGeometryChange()
+        self._path = None
+        self.update()
+
+    def _closing_twin(self, i):
+        """True when segment i ends exactly on its part's start and only "Z" follows (a curve closing the shape):
+        its end is the same corner as the start, so it isn't listed or moved separately."""
+        if i + 1 >= len(self.d) or self.d[i + 1][0] != "Z" or self.d[i][0] not in ("L", "C"):
+            return False
+        m = self.d[self._part_of(i)[0]]
+        return m[0] == "M" and abs(self.d[i][-2] - m[1]) < 1e-6 and abs(self.d[i][-1] - m[2]) < 1e-6
+
+    def vertex_indices(self):
+        return [i for i, s in enumerate(self.d) if s[0] in ("M", "L", "C") and not self._closing_twin(i)]
+
+    def curve_point(self, i, t):
+        """The point at t along segment i (straight or curved), in the item's own coordinates."""
+        sx, sy = self.scale()
+        s = self.d[i]
+        prev = self._start_of(i)
+        if s[0] == "C":
+            u = 1 - t
+            x = u ** 3 * prev[0] + 3 * u * u * t * s[1] + 3 * u * t * t * s[3] + t ** 3 * s[5]
+            y = u ** 3 * prev[1] + 3 * u * u * t * s[2] + 3 * u * t * t * s[4] + t ** 3 * s[6]
+        else:
+            end = self._end_of(i)
+            x, y = prev[0] + (end[0] - prev[0]) * t, prev[1] + (end[1] - prev[1]) * t
+        return QPointF(x * sx, y * sy)
+
+    def _start_of(self, i):
+        """Where segment i starts (unscaled)."""
+        s = self.d[i - 1]
+        if s[0] == "Z":  # after a Z the pen is back at that part's start
+            m = self.d[self._part_of(i - 1)[0]]
+            return m[1], m[2]
+        return s[-2], s[-1]
+
+    def _end_of(self, i):
+        s = self.d[i]
+        if s[0] == "Z":
+            m = self.d[self._part_of(i)[0]]
+            return m[1], m[2]
+        return s[-2], s[-1]
+
+    def bend_edge(self, i, t, local):
+        """Bends edge i so that the point at t on it passes through `local`: a straight edge becomes a curve.
+        Returns the (possibly new) index of the curve."""
+        sx, sy = self.scale()
+        if self.d[i][0] != "C":
+            a, b = self._start_of(i), self._end_of(i)
+            c = ["C", a[0] + (b[0] - a[0]) / 3, a[1] + (b[1] - a[1]) / 3,
+                 a[0] + 2 * (b[0] - a[0]) / 3, a[1] + 2 * (b[1] - a[1]) / 3, b[0], b[1]]
+            if self.d[i][0] == "Z":  # the closing edge: draw it as a curve back onto the start, then close
+                self.d.insert(i, c)
+            else:
+                self.d[i] = c
+        t = max(0.15, min(0.85, t))
+        cur = self.curve_point(i, t)
+        k = 3 * t * (1 - t)  # moving both handles by D moves the point at t by k * D
+        dx, dy = (local.x() - cur.x()) / k / sx, (local.y() - cur.y()) / k / sy
+        s = list(self.d[i])
+        s[1], s[2], s[3], s[4] = s[1] + dx, s[2] + dy, s[3] + dx, s[4] + dy
+        self.d[i] = s
+        self._changed()
+        return i
+
+    def vertex(self, i):
+        sx, sy = self.scale()
+        s = self.d[i]
+        return QPointF(s[-2] * sx, s[-1] * sy)
+
+    def is_closed(self):
+        return any(part[-1][0] == "Z" for part in self.subpaths() if part)
+
+    def _part_of(self, i):
+        start = max(j for j in range(i + 1) if self.d[j][0] == "M") if any(
+            self.d[j][0] == "M" for j in range(i + 1)) else 0
+        end = next((j for j in range(i + 1, len(self.d)) if self.d[j][0] == "M"), len(self.d))
+        return start, end
+
+    def edges(self):
+        """Every outline segment: (index that ends it, start, c1, c2, end), curves with their two handles,
+        straight ones with None for both; a closed part's last edge back to its start ends at its "Z"."""
+        sx, sy = self.scale()
+        pt = lambda x, y: QPointF(x * sx, y * sy)  # noqa: E731
+        out, start, prev = [], None, None
+        for i, s in enumerate(self.d):
+            if s[0] == "M":
+                start = prev = pt(s[1], s[2])
+            elif s[0] == "L" and prev is not None:
+                q = pt(s[1], s[2])
+                out.append((i, prev, None, None, q))
+                prev = q
+            elif s[0] == "C" and prev is not None:
+                q = pt(s[5], s[6])
+                out.append((i, prev, pt(s[1], s[2]), pt(s[3], s[4]), q))
+                prev = q
+            elif s[0] == "Z" and prev is not None and start is not None:
+                if abs(prev.x() - start.x()) + abs(prev.y() - start.y()) > 1e-6:
+                    out.append((i, prev, None, None, start))
+                prev = start
+        return out
+
+    def move_vertex(self, i, local):
+        """Moves a corner to `local`; a curve's handles next to it travel along, keeping the curve's shape."""
+        sx, sy = self.scale()
+        nx, ny = local.x() / sx, local.y() / sy
+        s = list(self.d[i])
+        dx, dy = nx - s[-2], ny - s[-1]
+        s[-2], s[-1] = nx, ny
+        if s[0] == "C":
+            s[3], s[4] = s[3] + dx, s[4] + dy
+        self.d[i] = s
+        if i + 1 < len(self.d) and self.d[i + 1][0] == "C":
+            n = list(self.d[i + 1])
+            n[1], n[2] = n[1] + dx, n[2] + dy
+            self.d[i + 1] = n
+        if s[0] == "M":  # a curve that closes this part ends here too
+            _, end = self._part_of(i)
+            j = end - 2 if end - 1 > i and self.d[end - 1][0] == "Z" else None
+            if j is not None and j > i and self.d[j][0] in ("L", "C"):
+                t = list(self.d[j])
+                if abs(t[-2] - (nx - dx)) < 1e-6 and abs(t[-1] - (ny - dy)) < 1e-6:
+                    t[-2], t[-1] = nx, ny
+                    if t[0] == "C":
+                        t[3], t[4] = t[3] + dx, t[4] + dy
+                    self.d[j] = t
+        self._changed()
+
+    def insert_vertex(self, end, local, t=0.5):
+        """A new corner on the edge that ends at index `end` (from edges()). Returns its index."""
+        sx, sy = self.scale()
+        x, y = local.x() / sx, local.y() / sy
+        s = self.d[end]
+        if s[0] == "C":  # split the curve at t, keeping its shape
+            prev = self.d[end - 1]
+            p0 = (prev[-2], prev[-1])
+            p1, p2, p3 = (s[1], s[2]), (s[3], s[4]), (s[5], s[6])
+            lerp = lambda a, b: (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)  # noqa: E731
+            a, b, c = lerp(p0, p1), lerp(p1, p2), lerp(p2, p3)
+            d, e = lerp(a, b), lerp(b, c)
+            m = lerp(d, e)
+            self.d[end:end + 1] = [["C", a[0], a[1], d[0], d[1], m[0], m[1]], ["C", e[0], e[1], c[0], c[1], p3[0], p3[1]]]
+        else:  # a straight edge, or the closing edge back to the start ("Z")
+            self.d.insert(end, ["L", x, y])
+        self._changed()
+        return end
+
+    def delete_vertex(self, i):
+        """Removes a corner. False when the part would be too small (a line needs 2, a shape 3)."""
+        start, end = self._part_of(i)
+        part = self.d[start:end]
+        n = sum(1 for s in part if s[0] in ("M", "L", "C"))
+        if n <= (3 if part[-1][0] == "Z" else 2):
+            return False
+        s = self.d[i]
+        if s[0] == "M":
+            nxt = self.d[i + 1]
+            j = end - 2 if self.d[end - 1][0] == "Z" else None
+            if j is not None and self._closing_twin(j):
+                t = list(self.d[j])
+                t[-2], t[-1] = nxt[-2], nxt[-1]
+                self.d[j] = t
+            self.d[i:i + 2] = [["M", nxt[-2], nxt[-1]]]
+        else:
+            if s[0] == "C" and i + 1 < len(self.d) and self.d[i + 1][0] == "C":
+                n2 = list(self.d[i + 1])
+                n2[1], n2[2] = s[1], s[2]  # the merged curve leaves along the removed curve's first handle
+                self.d[i + 1] = n2
+            del self.d[i]
+        self._changed()
+        return True
+
+    def set_closed(self, on):
+        out = []
+        for part in self.subpaths():
+            part = [s for s in part if s[0] != "Z"]
+            out += part + ([["Z"]] if on and len(part) >= 2 else [])
+        self.d = out
+        self._changed()
+
+    def renormalize(self):
+        """After corners moved: fits the box snugly around the drawing again, without anything moving on screen
+        (rotation included)."""
+        sx, sy = self.scale()
+        xs = [v * sx for s in self.d for v in s[1::2]]
+        ys = [v * sy for s in self.d for v in s[2::2]]
+        if not xs:
+            return
+        x0, y0 = min(xs), min(ys)
+        nw, nh = max(1.0, max(xs) - x0), max(1.0, max(ys) - y0)
+        self.d = [[s[0]] + [round(v * sx - x0, 3) if k % 2 == 0 else round(v * sy - y0, 3)
+                            for k, v in enumerate(s[1:])] for s in self.d]
+        old_c, new_c = QPointF(self.w / 2, self.h / 2), QPointF(nw / 2, nh / 2)
+        turn = QTransform().rotate(self.rotation())
+        pos = self.pos() + old_c - new_c + turn.map(QPointF(x0, y0) + new_c - old_c)
+        self.w0, self.h0 = nw, nh
+        self.set_size(nw, nh)
+        self.setPos(pos)
+
+    def set_size(self, w, h):
+        self._path = None
+        super().set_size(w, h)
+
+    def margin(self):
+        return self.sw / 2 + 2
+
+    def shape(self):
+        st = QPainterPathStroker()
+        st.setWidth(max(8.0, self.sw + 6))
+        hit = st.createStroke(self.path())
+        if self.fill:
+            hit.addPath(self.path())
+            hit.setFillRule(Qt.WindingFill)
+        return hit
+
+    def paint(self, p, opt, widget=None):
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(make_pen(self.stroke, self.sw, self.dash, CAPS.get(self.cap, Qt.FlatCap)))
+        p.setBrush(self.fill_brush())
+        p.drawPath(self.path())
+
+    def to_dict(self):
+        d = self.base()
+        d.update(d=self.d, w0=self.w0, h0=self.h0, fill=self.fill, stroke=self.stroke, sw=self.sw, dash=self.dash,
+                 rule=self.rule, cap=self.cap)
+        if self.smooth:
+            d["smooth"] = True
+        if self.grad and self.fill:
+            d["grad"] = dict(self.grad)
+        return d
+
+
 ITEM_TYPES = {"text": SlideText, "shape": SlideShape, "image": SlideImage, "line": SlideLine, "stroke": SlideStroke,
-              "zoom": SlideZoom}
+              "zoom": SlideZoom, "path": SlidePath}
 
 
 def item_from_dict(d):

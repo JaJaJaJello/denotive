@@ -21,6 +21,9 @@ Change or back up the library from the ⚙ button in the sidebar.
   limit (Settings, default 50 MB) are copied into the library so you always have the exact version you used;
   *Update snapshot* stacks a new version when the original changes. Images dropped on a board become evidence
   (hold Shift to attach them as files instead).
+- **PDF and SVG figures as editable evidence**: right-click an attached PDF or SVG → *Open … as editable
+  evidence…*, or right-click the board → *Import PDF or SVG as editable evidence…*. You get a new evidence card whose lines, text and
+  pictures are separate editable pieces (see *Import a PDF* under the evidence editor).
 - **Ctrl+V** pastes a screenshot as new evidence, text as a sticky note, or copied cards.
 - Tools: **V** select · **H** pan · **S** string · **T** text · **N** sticky · **R** shape · **L** arrow ·
   **F** frame (dragging a frame carries everything inside it).
@@ -108,8 +111,8 @@ Using it:
 
 ## Evidence editor
 Text boxes (rich text, lists, tables), code blocks with highlighting, pictures (insert, paste, drag in,
-**Snip** a region of the screen), crop, 12 shapes, lines and arrows, pen and highlighter ink, eraser,
-layers, lock, align/distribute, smart guides, rotate, opacity, shadows and several page sizes.
+**Snip** a region of the screen), crop, 12 shapes, freeform shapes, gradient fills, lines and arrows, pen and highlighter ink,
+eraser, layers, lock, align/distribute, smart guides, rotate, opacity, shadows and several page sizes.
 **Double-click** an empty spot on the page to drop a text box there and start typing. Shift-click or Ctrl-click
 selects several things at once, each with its own outline.
 The notes pane under the slide is searchable and is exported as speaker notes.
@@ -134,6 +137,16 @@ The notes pane under the slide is searchable and is exported as speaker notes.
   box takes its shape and colour. Drag the outline to magnify a different part; its corner dots resize it. The
   side panel sets the magnification, shape, outline colour and whether the joining lines show. The callout
   moves with its picture and goes with it when the picture is deleted.
+- **Gradients**: pick the **Gradient tool** (G) and click a shape, text box or imported drawing. Its fill becomes
+  a gradient (from its colour to white, or to a darker shade if it's already pale) and a circle appears around
+  it. **Drag the circle** to turn the gradient (hold **Shift** for 15° steps). **Drag the dot** in the middle to
+  move the circle off-centre, and double-click the dot to put it back. The **two parallel lines** are where the
+  blend starts and ends: before the first it's all the start colour, after the second all the end colour. Drag
+  either line to make the blend sharper or softer; they snap to the shape's edges and to the middle (hold **Alt**
+  to place them freely). The small squares on the lines show each line's colour. In the side panel, *Fill &
+  border* has **Type: Solid / Gradient**, the two colours, a swap button, the angle and **Edit on slide**. The
+  gradient stretches with the shape when you resize it, turns with it when you rotate it, and carries through
+  to PDF, PowerPoint export and copy-paste into PowerPoint as a real gradient fill.
 - **Arrow keys** move the selection 1 pixel (**Shift**+arrow: 10).
 - **Copy into PowerPoint, Word or Excel**: select things and press Ctrl+C, then paste in the other app. They
   arrive as real, editable PowerPoint objects at their true size and layout: shapes stay shapes with their text,
@@ -153,6 +166,60 @@ The notes pane under the slide is searchable and is exported as speaker notes.
 - **Group**: select several things and press **Ctrl+G** (or right-click → Group). Clicking any member selects the
   whole group, which moves, aligns and resizes as one (drag its handles to scale everything in it).
   **Ctrl+Shift+G** ungroups. Grouped items show ⧉ in the Layers list.
+- **Freeform shapes**: pick the **Freeform tool** (F, next to the shapes). Click corner by corner for straight
+  sides, or press and drag to draw freehand. A drag that starts the shape closes and smooths itself when you
+  let go, and a drag in the middle of a click-drawn shape adds a freehand stretch. Click the first corner
+  again, double-click or press **Enter** to close it into a filled shape. **Esc** leaves it as an open line,
+  and **Backspace** takes back the last corner. Hold **Shift** for 45° steps and **Alt** to skip snapping. In
+  the side panel, **Smooth** draws any freeform as a smooth curve through its corners, and **Closed** joins
+  the ends into a shape. Closing an open line also gives it a fill, ready for a gradient.
+- **Edit points** on anything with an outline: double-click a freeform, or right-click any shape, line or pen
+  stroke → *Edit points* (shapes, lines and strokes turn into freeform shapes; a shape's text moves into its
+  own text box, grouped with it). **Drag a corner** to move it, **drag an edge** to bend it into a curve
+  through the cursor, **click an edge** to add a corner, select a corner and press **Delete** to remove it.
+  **Esc**, Enter or clicking away finishes. This works on PDF imports and traced figures too. For example,
+  take an open traced outline, close it, then give it a gradient. Freeforms export and copy to PowerPoint as
+  editable freeform shapes, rotated ones included.
+- **Import a PDF as editable pieces**, like Inkscape's PDF import: click **PDF** in the toolbar, drag a PDF onto
+  the slide, or right-click the page → *Import PDF as editable shapes…*. With several pages you pick one from a
+  preview. A figure made by a program (matplotlib, Origin, Excel, a journal's PDF) comes in as its own drawing:
+  every plot line, dashed line, marker set, bar, axis and fill is an exact vector piece, every line of text is a
+  text box you can retype (rotated axis labels, Greek letters, bold or italic words and super/subscripts such as
+  cm⁻¹ stay in place), and pictures stay pictures. Each plot series is one piece, so you can recolour, thicken,
+  dash, hide or move a series on its own in the side panel. The pieces arrive grouped so the figure moves as
+  one; **Ctrl+Shift+G** takes them apart. Right-click a marker series → *Split apart* gives every marker its own
+  piece. Fonts the PC doesn't have are replaced by the closest match (Arial, Times New Roman, Consolas), so
+  text can come out slightly wider or narrower. Gradients are left out (you're told how many). A scanned page holds
+  only a picture of the page, so it comes in as that picture. Tip for matplotlib: save with
+  `matplotlib.rcParams["pdf.fonttype"] = 42`. Its default font type stores symbols like θ and − as drawings, so
+  they arrive as shapes, not letters. The pieces export and copy to PowerPoint as editable freeform shapes.
+- **SVG files** work the same way: **PDF** in the toolbar, dragging an .svg onto the slide, or right-click →
+  *Import PDF or SVG as editable shapes…* bring every path, shape and text in as editable pieces. CSS styles,
+  reused symbols (matplotlib's markers) and transforms come along. Linear gradients become real DeNotive
+  gradients you can adjust with the Gradient tool; radial gradients become a solid in-between colour. Font lists
+  like matplotlib's ("DejaVu Sans, …, Verdana, Arial") use the first font this PC has. Maths labels placed letter
+  by letter (2θ, cm⁻¹) come back together as one line with their super/subscripts. **Insert picture…** with an
+  .svg gives a sharp picture instead (drawn 2400 pixels wide). Blur filters, masks and animation aren't
+  brought over. Tip for matplotlib: its default SVGs store text as letter outlines, which come in as shapes. Save
+  with `plt.rcParams["svg.fonttype"] = "none"` and the labels come in as editable text.
+- **Predict Shapes**: right-click a picture of a figure (a screenshot of a plot, a chart from a paper) →
+  *Predict Shapes* to redraw it as editable pieces: plot lines, filled bands, frames, boxes, arrows and text you
+  can retype. They come in as one group exactly over the picture. The picture is hidden underneath: Ctrl+Z or
+  right-click → *Show hidden items* brings it back. Choose what reads the picture in **Settings → AI settings… →
+  Image to shape prediction**:
+  - **Claude** (or whichever AI the Co-Investigator or note drafting uses), with a choice of its models. Claude
+    reads labels very well, formulas with subscripts included (Li₂W₂O₇, 2θ, °C). The picture is sent to it.
+    **Claude Opus is the default**, through the Claude desktop app (or your Anthropic API key, if that's how the
+    Co-Investigator reaches Claude).
+  - **The built-in trained model**, which runs on this computer and sends nothing anywhere.
+
+  If the AI can't answer (signed out, usage limit reached, no usable reply), the built-in model steps in and you're
+  told why. Either way the exact lines, areas and frames are then traced from the picture's own pixels: a plot
+  with hundreds of points and sharp peaks comes back to about a pixel, in its real colours, line widths and dash
+  styles. A prediction takes about 10 seconds with the built-in model and 15–40 seconds with Claude, and Cancel
+  stops it. Shaded parts such as a heatmap's image stay pictures. This needs the DeNotive Vectorizer (the
+  `trainer` folder beside DeNotive) and a Python with PyTorch, OpenCV, SciPy and PySide6. The settings section
+  says whether they were found (see `trainer\README.md`).
 - **Pages**: need more room? Click **+ Add page** under the page (or **Page** in the toolbar, or right-click →
   *Add page below*). Pages stack top to bottom with a small gap; scroll between them, or use the arrows /
   Page Up / Page Down. Things snap to every page's edges. Right-click a page → *Delete page*, or the bin next to

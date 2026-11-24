@@ -402,7 +402,59 @@ class _PptxBuilder:
             return self._line(slide, d)
         if t == "stroke":
             return self._ink(slide, d)
+        if t == "path":
+            return self._path(slide, d)
         return False
+
+    def _gradient(self, shp, d):
+        """Gives a shape a gradient fill when the item has one. True if it did.
+
+        DrawingML draws a linear gradient along a line through the box centre that just reaches the corners at
+        the gradient's angle (like CSS), so DeNotive's start and end lines become stop positions on that line.
+        Stops past the box ends are clipped, with the colour that shows there. The angle is in the shape's own
+        frame (rotWithShape), so rotated shapes keep their gradient."""
+        from pptx.oxml.ns import qn
+        from .slide.items import clean_grad, grad_color_at, grad_geom
+        g = clean_grad(d.get("grad")) if d.get("fill") else None
+        if not g:
+            return False
+        w, h = float(d["w"]), float(d["h"])
+        _, (dx, dy), _, p1, p2 = grad_geom(g, w, h)
+        half = max(1e-6, (abs(w * dx) + abs(h * dy)) / 2)
+
+        def along(pt):
+            return ((pt.x() - w / 2) * dx + (pt.y() - h / 2) * dy + half) / (2 * half)
+
+        t1, t2 = along(p1), along(p2)
+
+        def colour(u):
+            if abs(t2 - t1) < 1e-9:
+                return g["c1"] if u < t1 else g["c2"]
+            return grad_color_at(g, (u - t1) / (t2 - t1))
+
+        stops = [(0.0, colour(0.0))] + [(u, colour(u)) for u in sorted({t1, t2}) if 0.0 < u < 1.0] + \
+                [(1.0, colour(1.0))]
+        shp.fill.gradient()
+        gf = shp._element.spPr.find(qn("a:gradFill"))
+        gf.set("rotWithShape", "1")
+        lst = gf.find(qn("a:gsLst"))
+        for old in list(lst):
+            lst.remove(old)
+        for pos, col in stops:
+            q = QColor(col)
+            gs = lst.makeelement(qn("a:gs"), {"pos": str(int(round(pos * 100000)))})
+            clr = gs.makeelement(qn("a:srgbClr"), {"val": f"{q.red():02X}{q.green():02X}{q.blue():02X}"})
+            if q.alpha() < 255:
+                clr.append(clr.makeelement(qn("a:alpha"), {"val": str(int(q.alphaF() * 100000))}))
+            gs.append(clr)
+            lst.append(gs)
+        lin = gf.find(qn("a:lin"))
+        if lin is None:
+            lin = gf.makeelement(qn("a:lin"), {})
+            lst.addnext(lin)
+        lin.set("ang", str(int(round((g["ang"] % 360) * 60000))))
+        lin.set("scaled", "0")
+        return True
 
     def _line_style(self, line, color, width, dash="solid", alpha=None):
         from pptx.enum.dml import MSO_LINE_DASH_STYLE
@@ -497,7 +549,7 @@ class _PptxBuilder:
         tf.auto_size = MSO_AUTO_SIZE.NONE
         pad = float(d.get("pad", 6)) + 2
         tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = self.L(pad)
-        if d.get("fill"):
+        if d.get("fill") and not self._gradient(shp, d):
             shp.fill.solid()
             shp.fill.fore_color.rgb = self.rgb(d["fill"])
         if d.get("stroke") and float(d.get("sw", 0)) > 0:
@@ -526,7 +578,9 @@ class _PptxBuilder:
                 shp.adjustments[0] = max(0.0, min(0.5, float(d.get("radius", 16)) / max(1.0, min(w, h))))
             except (IndexError, ValueError):
                 pass
-        if d.get("fill"):
+        if self._gradient(shp, d):
+            pass
+        elif d.get("fill"):
             shp.fill.solid()
             shp.fill.fore_color.rgb = self.rgb(d["fill"])
         else:
@@ -592,6 +646,59 @@ class _PptxBuilder:
         shp.fill.background()
         self._line_style(shp.line, d.get("color", "#e5484d"), float(d.get("sw", 4)),
                          alpha=0.38 if d.get("hl") else None)
+        shp.shadow.inherit = False
+        return True
+
+    def _path(self, slide, d):
+        """A freeform path (drawn, imported or traced) as an editable PowerPoint freeform shape (curves become short
+        straight pieces). Rotated ones are placed unrotated and then turned, the way PowerPoint turns shapes."""
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QTransform
+        from .slide.items import SlidePath
+        item = SlidePath(d)
+        polys = [pl for pl in item.path().toSubpathPolygons() if pl.count() >= 2]
+        if not polys or len(polys) > 400:
+            return False
+        rot = float(d.get("rot", 0) or 0) % 360
+        shift = QPointF(d["x"], d["y"])
+        if abs(rot) > 0.01:
+            # PowerPoint turns a shape about the middle of its outline; DeNotive about the middle of its box
+            br = polys[0].boundingRect()
+            for pl in polys[1:]:
+                br = br.united(pl.boundingRect())
+            cp, c = br.center(), QPointF(item.w / 2, item.h / 2)
+            shift = QPointF(d["x"], d["y"]) + c + QTransform().rotate(rot).map(cp - c) - cp
+        X = lambda pt: int(round(self.ox + (shift.x() + pt.x()) * self.f))  # noqa: E731
+        Y = lambda pt: int(round(self.oy + (shift.y() + pt.y()) * self.f))  # noqa: E731
+        first = polys[0]
+        b = slide.shapes.build_freeform(X(first[0]), Y(first[0]), scale=1.0)
+        for k, pl in enumerate(polys):
+            pts = [pl[i] for i in range(pl.count())]
+            closed = len(pts) > 2 and abs(pts[0].x() - pts[-1].x()) < 1e-6 and abs(pts[0].y() - pts[-1].y()) < 1e-6
+            if k:
+                b.move_to(X(pts[0]), Y(pts[0]))
+            b.add_line_segments([(X(pt), Y(pt)) for pt in pts[1:]], close=closed)
+        shp = b.convert_to_shape()
+        if abs(rot) > 0.01:
+            shp.rotation = rot
+        if self._gradient(shp, d):
+            pass
+        elif d.get("fill"):
+            shp.fill.solid()
+            shp.fill.fore_color.rgb = self.rgb(d["fill"])
+            a = QColor(d["fill"]).alphaF()
+            if a < 0.999:  # see-through fills (e.g. a chart legend's box)
+                from pptx.oxml.ns import qn
+                clr = shp.fill.fore_color._color._xClr
+                clr.append(clr.makeelement(qn("a:alpha"), {"val": str(int(a * 100000))}))
+        else:
+            shp.fill.background()
+        if d.get("stroke") and float(d.get("sw", 0)) > 0:
+            a = QColor(d["stroke"]).alphaF()
+            self._line_style(shp.line, d["stroke"], float(d["sw"]), d.get("dash", "solid"),
+                             alpha=a if a < 0.999 else None)
+        else:
+            shp.line.fill.background()
         shp.shadow.inherit = False
         return True
 

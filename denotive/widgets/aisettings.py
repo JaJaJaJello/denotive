@@ -267,6 +267,78 @@ class RoleBox(QFrame):
             self.result.setText("Finish signing in in the window that opened, then press Test.")
 
 
+class ShapesBox(QFrame):
+    """Image to shape prediction: which AI (or the built-in trained model) redraws a picture as pieces."""
+
+    def __init__(self, dlg):
+        super().__init__()
+        from .. import shapes
+        self.dlg = dlg
+        self.setObjectName("Card")
+        v = QVBoxLayout(self)
+        v.setContentsMargins(16, 14, 16, 14)
+        v.setSpacing(8)
+        self.use = QComboBox()
+        v.addLayout(RoleBox._row("Use", self.use))
+        v.addWidget(label("Right-click a picture in the evidence editor and choose Predict Shapes to redraw it as "
+                          "editable pieces: lines, filled areas, boxes and text. Claude reads labels very well; the "
+                          "built-in model runs on this computer and sends nothing anywhere. The picture is sent to "
+                          "the AI you pick here. Either way the exact lines, areas and frames are then traced from "
+                          "the picture's own pixels. If the AI can't answer (signed out, usage limit reached, no "
+                          "usable reply), the built-in model is used instead.", "Hint", wrap=True))
+        self.status = label("Built-in model: checking…", "Muted", wrap=True)
+        self.status.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        v.addWidget(self.status)
+        self._saved = shapes.config()
+        self._fill()
+        for box in (dlg.coinv, dlg.notes):
+            box.provider.currentIndexChanged.connect(self._fill)
+            box.model.currentTextChanged.connect(self._fill)
+        dlg.same.toggled.connect(self._fill)
+        a = _Async(self)
+        a.done.connect(lambda r: self.status.setText(("✓ Built-in model: " if r[0] else "⚠ Built-in model: ") + r[1]))
+        a.go(shapes.readiness)
+
+    def _choices(self):
+        from ..ai.providers import SHORT_NAMES
+        out = [("Built-in trained model (runs on this computer)", {"engine": "builtin"})]
+        boxes = [self.dlg.coinv] + ([] if self.dlg.same.isChecked() else [self.dlg.notes])
+        seen = set()
+        for box in boxes:
+            kind = box.kind()
+            if kind in ("none", "manual"):
+                continue
+            models = list(SUGGESTED.get(kind, []))
+            cur = box.model.currentText().strip()
+            if cur and cur not in models:
+                models.insert(0, cur)
+            for m in models or ["default"]:
+                if (kind, m) in seen:
+                    continue
+                seen.add((kind, m))
+                out.append((f"{SHORT_NAMES.get(kind, kind)} · {m}", {"engine": "ai", "provider": kind, "model": m}))
+        s = self._saved  # the current choice (Claude Opus by default) stays listed even if neither role uses it
+        if s.get("engine") == "ai" and (s.get("provider"), s.get("model")) not in seen:
+            out.append((f"{SHORT_NAMES.get(s['provider'], s['provider'])} · {s.get('model') or 'default'}", dict(s)))
+        return out
+
+    def _fill(self, *_):
+        want = self.value() if self.use.count() else self._saved
+        self.use.blockSignals(True)
+        self.use.clear()
+        pick = 0
+        for i, (name, cfg) in enumerate(self._choices()):
+            self.use.addItem(name, cfg)
+            if cfg.get("engine") == want.get("engine") and (cfg.get("engine") == "builtin" or (
+                    cfg.get("provider") == want.get("provider") and cfg.get("model") == want.get("model"))):
+                pick = i
+        self.use.setCurrentIndex(pick)
+        self.use.blockSignals(False)
+
+    def value(self):
+        return dict(self.use.currentData() or {"engine": "builtin"})
+
+
 class AISettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -310,6 +382,10 @@ class AISettingsDialog(QDialog):
         self.notes.setVisible(not self.same.isChecked())
         self.same.toggled.connect(lambda on: self.notes.setVisible(not on))
         v.addWidget(self.notes)
+        v.addWidget(hsep())
+        v.addWidget(section_label("Image to shape prediction — “Predict Shapes” on a picture in the evidence editor"))
+        self.shapes = ShapesBox(self)
+        v.addWidget(self.shapes)
         v.addStretch(1)
         scroll.setWidget(body)
         outer.addWidget(scroll, 1)
@@ -333,4 +409,6 @@ class AISettingsDialog(QDialog):
         notes["persona_too"] = self.persona_too.isChecked()
         notes.pop("persona", None)
         settings.set("ai", {"coinv": self.coinv.config(), "notes": notes})
+        from .. import shapes
+        settings.set(shapes.KEY, dict(settings.get(shapes.KEY) or {}, **self.shapes.value()))
         super().accept()

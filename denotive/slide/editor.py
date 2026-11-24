@@ -13,12 +13,14 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDou
 
 from .. import context, geometry, media, textmarks, theme
 from ..widgets.common import ColorButton, hsep, shift_as_ctrl, label, push_button, section_label, tool_button, vsep
-from .items import (PAGE_SIZES, SlideImage, SlideItem, SlideLine, SlideShape, SlideStroke, SlideText, SlideZoom,
-                    TextBearing, doc_aspect)
+from .items import (PAGE_SIZES, SlideImage, SlideItem, SlideLine, SlidePath, SlideShape, SlideStroke, SlideText,
+                    SlideZoom, TextBearing, default_grad, doc_aspect, short_id)
 from .scene import SlideScene
 
 SLIDE_MIME = "application/x-denotive-slide-items"
-IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.gif *.bmp *.tif *.tiff *.webp);;All files (*)"
+IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.gif *.bmp *.tif *.tiff *.webp *.svg *.svgz);;All files (*)"
+VECTOR_FILTER = "PDF or SVG (*.pdf *.svg *.svgz);;All files (*)"
+SVG_EXTS = {".svg", ".svgz"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"}
 
 
@@ -177,6 +179,8 @@ class SlideView(QGraphicsView):
                     self.viewport().setCursor(cur)
                 else:
                     self.viewport().unsetCursor()
+            elif sc.tool == "gradient":
+                self.viewport().setCursor(sc.grad_cursor(sc.grad_hit(sp)) or Qt.PointingHandCursor)
         super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e):
@@ -582,15 +586,48 @@ class Inspector(QScrollArea):
         self.sw = spin(0, 60, 0.5, 1, " px", 74)
         self.sw.valueChanged.connect(lambda v: self._attr("sw", v))
         s.row("Fill", self.fill, label("Border", "Muted"), self.stroke, self.sw)
+        self.fill_kind = QComboBox()
+        self.fill_kind.addItems(["Solid", "Gradient"])
+        self.fill_kind.setToolTip("A gradient blends from one colour into another")
+        self.fill_kind.currentIndexChanged.connect(self._set_fill_kind)
+        self.grad_edit = push_button("Edit on slide", "gradient")
+        self.grad_edit.setFocusPolicy(Qt.NoFocus)
+        self.grad_edit.setToolTip("Gradient tool (G): turn the circle to aim the gradient, drag the two lines to set "
+                                  "where it starts and ends, drag the middle dot to move it off-centre")
+        self.grad_edit.clicked.connect(lambda: self.page.set_tool("gradient"))
+        self.kind_row = s.row("Type", self.fill_kind, self.grad_edit)
+        self.g1 = ColorButton("#5b8cff", tip="Start colour (before the first line)")
+        self.g1.colorChanged.connect(lambda c: self._set_grad_key("c1", c))
+        self.g2 = ColorButton("#ffffff", tip="End colour (after the second line)")
+        self.g2.colorChanged.connect(lambda c: self._set_grad_key("c2", c))
+        swap = tool_button("sync", "Swap the two colours", size=16)
+        swap.setFocusPolicy(Qt.NoFocus)
+        swap.clicked.connect(self._swap_grad)
+        self.gang = spin(0, 359, 15, 0, "°", 66)
+        self.gang.setWrapping(True)
+        self.gang.setToolTip("Direction: 0° runs left to right, 90° top to bottom")
+        self.gang.valueChanged.connect(lambda v: self._set_grad_key("ang", float(v) % 360))
+        self.grad_row = s.row("Colours", self.g1, swap, self.g2, self.gang)
         self.dash = QComboBox()
         self.dash.addItems(["solid", "dash", "dot", "dashdot"])
         self.dash.currentTextChanged.connect(lambda t: self._attr("dash", t))
         self.radius = spin(0, 400, 1, 0, " px", 74)
         self.radius.valueChanged.connect(lambda v: self._attr("radius", v))
-        s.row("Dash", self.dash, label("Corner", "Muted"), self.radius)
+        self.corner_lbl = label("Corner", "Muted")
+        s.row("Dash", self.dash, self.corner_lbl, self.radius)
         self.shadow = QCheckBox("Drop shadow")
         self.shadow.toggled.connect(lambda on: self._attr("shadow", on))
         s.lay.addWidget(self.shadow)
+        self.p_smooth = QCheckBox("Smooth")
+        self.p_smooth.setToolTip("Draw the outline as a smooth curve through its corners")
+        self.p_smooth.toggled.connect(self._set_smooth)
+        self.p_closed = QCheckBox("Closed")
+        self.p_closed.setToolTip("Join the last corner back to the first (a shape), or leave it open (a line)")
+        self.p_closed.toggled.connect(self._set_closed)
+        self.p_edit = push_button("Edit points", "edit")
+        self.p_edit.setToolTip("Drag corners, click an edge to add one, Delete removes the picked one, Esc when done")
+        self.p_edit.clicked.connect(self._edit_points)
+        self.path_row = s.row(self.p_smooth, self.p_closed, self.p_edit)
         # ---- line
         s = self.sec_line = Section("Line")
         self.lcolor = ColorButton("#1d1f24", tip="Line colour")
@@ -756,10 +793,32 @@ class Inspector(QScrollArea):
             self.scene.push_state()
             self.scene.update()
 
+    def _set_smooth(self, on):
+        if self._busy:
+            return
+        for it in self.selected((SlidePath,)):
+            it.smooth = on
+            it._changed()
+        self.scene.push_state()
+
+    def _set_closed(self, on):
+        if self._busy:
+            return
+        for it in self.selected((SlidePath,)):
+            self.page.close_path(it, on, push=False)
+        self.scene.push_state()
+        self.refresh()
+
+    def _edit_points(self):
+        sel = self.selected()
+        if len(sel) == 1:
+            self.page.set_tool("select")
+            self.page.edit_points(sel[0])
+
     def _set_stroke(self, c):
         if self._busy:
             return
-        items = self.selected((SlideShape, SlideText, SlideImage))
+        items = self.selected((SlideShape, SlideText, SlideImage, SlidePath))
         for it in items:
             it.stroke = c
             if c and it.sw <= 0:
@@ -769,6 +828,52 @@ class Inspector(QScrollArea):
         if items:
             self.refresh()
             self.scene.push_state()
+
+    def _fillables(self):
+        return self.selected((SlideShape, SlideText, SlidePath))
+
+    def _set_fill_kind(self, idx):
+        if self._busy:
+            return
+        items = self._fillables()
+        for it in items:
+            if idx == 1 and not it.grad:
+                it.set_grad(default_grad(it.fill or self.scene.opts["shape_fill"], it.w, it.h))
+            elif idx == 0 and it.grad:
+                it.grad = None  # the solid fill stays at the start colour
+                it.update()
+        if items:
+            self.scene.push_state()
+            if idx == 1 and len(items) == 1:
+                self.page.set_tool("gradient")  # show the circle straight away
+            self.refresh()
+
+    def _set_grad_key(self, key, value):
+        if self._busy:
+            return
+        items = [i for i in self._fillables() if i.grad]
+        for it in items:
+            it.set_grad(dict(it.grad, **{key: value}))
+        if items:
+            self.scene.push_state()
+            self.scene.update()
+
+    def _swap_grad(self):
+        items = [i for i in self._fillables() if i.grad]
+        for it in items:
+            g = it.grad
+            it.set_grad(dict(g, c1=g["c2"], c2=g["c1"]))
+        if items:
+            self.scene.push_state()
+            self.scene.update()
+            self.refresh()
+
+    @staticmethod
+    def _row_visible(row, on):
+        for i in range(row.count()):
+            w = row.itemAt(i).widget()
+            if w is not None:
+                w.setVisible(on)
 
     def _set_shape_kind(self, _):
         if self._busy:
@@ -1010,7 +1115,7 @@ class Inspector(QScrollArea):
             sel = self.selected()
             editing = sc.editing
             text_items = [editing] if editing else [i for i in sel if isinstance(i, TextBearing)]
-            fill_items = [i for i in sel if isinstance(i, (SlideShape, SlideText, SlideImage))]
+            fill_items = [i for i in sel if isinstance(i, (SlideShape, SlideText, SlideImage, SlidePath))]
             self.sec_slide.setVisible(not sel and editing is None)
             self.sec_text.setVisible(bool(text_items) or (not sel and editing is None))
             self.sec_fill.setVisible(bool(fill_items))
@@ -1078,14 +1183,35 @@ class Inspector(QScrollArea):
                 if isinstance(it, SlideShape):
                     idx = self.shape_kind.findData(it.shape_kind)
                     self.shape_kind.setCurrentIndex(max(0, idx))
-                self.fill.setVisible(not isinstance(it, SlideImage))
+                g = getattr(it, "grad", None)
+                gradable = isinstance(it, (SlideShape, SlideText, SlidePath))
+                self.fill.setVisible(not isinstance(it, SlideImage) and not g)
                 self.fill.setColor(getattr(it, "fill", None))
+                self._row_visible(self.kind_row, gradable)
+                self.fill_kind.setCurrentIndex(1 if g else 0)
+                self.grad_edit.setVisible(bool(g))
+                self.grad_edit.setEnabled(len(fill_items) == 1)
+                self._row_visible(self.grad_row, bool(g))
+                if g:
+                    self.g1.setColor(g["c1"])
+                    self.g2.setColor(g["c2"])
+                    self.gang.setValue(round(g["ang"]) % 360)
                 self.stroke.setColor(it.stroke)
                 self.sw.setValue(it.sw)
                 self.dash.setCurrentText(getattr(it, "dash", "solid"))
                 self.radius.setValue(it.radius)
-                self.shadow.setVisible(not isinstance(it, SlideText))
+                for w in (self.corner_lbl, self.radius):
+                    w.setVisible(not isinstance(it, SlidePath))
+                self.shadow.setVisible(not isinstance(it, (SlideText, SlidePath)))
                 self.shadow.setChecked(bool(getattr(it, "shadow", False)))
+                is_path = isinstance(it, SlidePath)
+                self._row_visible(self.path_row, is_path or isinstance(it, SlideShape))
+                for w in (self.p_smooth, self.p_closed):
+                    w.setVisible(is_path)
+                if is_path:
+                    self.p_smooth.setChecked(it.smooth)
+                    self.p_closed.setChecked(it.is_closed())
+                self.p_edit.setEnabled(len(sel) == 1 and not it.locked)
             lines = [i for i in sel if isinstance(i, SlideLine)]
             if lines:
                 ln = lines[0]
@@ -1144,7 +1270,7 @@ class Inspector(QScrollArea):
         self.layers.blockSignals(True)
         self.layers.clear()
         icons = {"text": "textbox", "shape": "shape_round", "image": "image", "line": "tool_line",
-                 "stroke": "ink", "zoom": "callout"}
+                 "stroke": "ink", "zoom": "callout", "path": "pen"}
         groups = self.scene.groups()
         for it in reversed(self.scene.sorted_items()):
             li = QListWidgetItem(theme.icon(icons.get(it.TYPE, "doc"), 16, theme.MUTED if it.isVisible() else theme.FAINT),
@@ -1170,10 +1296,16 @@ class EditorPage(QWidget):
     finished = Signal(dict)  # {"board_id", "item_id", "created", "saved"}
 
     TOOLS = [("select", "cursor", "Select (V)", "V"), ("text", "tool_text", "Text box (T)", "T"),
-             ("code", "code", "Code block", None), ("line", "tool_line", "Line (L)", "L"),
+             ("code", "code", "Code block", None),
+             ("freeform", "freeform", "Freeform (F): click corner by corner, or drag to draw freehand. Click the "
+                                      "first corner, double-click or press Enter to close the shape; Esc leaves it as "
+                                      "an open line; Backspace takes back the last corner", "F"),
+             ("line", "tool_line", "Line (L)", "L"),
              ("arrow", "tool_arrow", "Arrow (A)", "A"), ("pen", "ink", "Pen (P)", "P"),
              ("highlighter", "highlighter", "Highlighter (H)", "H"), ("eraser", "eraser", "Eraser (E)", "E"),
-             ("zoom", "callout", "Zoom-in callout (Z): drag over part of a picture to magnify it", "Z")]
+             ("zoom", "callout", "Zoom-in callout (Z): drag over part of a picture to magnify it", "Z"),
+             ("gradient", "gradient", "Gradient (G): click a shape, turn the circle to aim the gradient, drag the two "
+                                      "lines to set where it starts and ends, drag the middle dot to move it", "G")]
 
     def __init__(self, main):
         super().__init__()
@@ -1264,6 +1396,10 @@ class EditorPage(QWidget):
         img = tool_button("image", "Insert picture…", text="Picture")
         img.clicked.connect(self.insert_image)
         rl.addWidget(img)
+        pdf = tool_button("pdf", "Import a PDF page or an SVG as editable shapes and text — chart lines, fills and "
+                                 "labels come in as separate pieces", text="PDF")
+        pdf.clicked.connect(lambda: self.import_pdf())
+        rl.addWidget(pdf)
         snip = tool_button("snip", "Snip part of the screen (Win+Shift+S) and drop it in", text="Snip")
         snip.clicked.connect(self.snip)
         rl.addWidget(snip)
@@ -1516,6 +1652,12 @@ class EditorPage(QWidget):
 
     def _escape(self):
         sc = self.scene
+        if sc.ff is not None:
+            sc.ff_finish(False)
+            return
+        if sc.pe is not None:
+            sc.stop_point_edit()
+            return
         if sc.pick is not None:
             sc.pick = None
             self._pick_done()
@@ -1695,6 +1837,10 @@ class EditorPage(QWidget):
     # ---- tools & commands
     def set_tool(self, tool):
         sc = self.scene
+        if sc.ff is not None and tool != "freeform":
+            sc.ff_finish(len(sc.ff["pts"]) >= 3)
+        if tool != "select":
+            sc.stop_point_edit()
         if tool != "select":
             sc.stop_text_edit()
         sc.tool = tool
@@ -1704,8 +1850,19 @@ class EditorPage(QWidget):
         if tool.startswith("shape:"):
             self.shape_btn.setIcon(theme.icon("shape_" + tool.split(":")[1], 18))
         self.view.setDragMode(QGraphicsView.RubberBandDrag if tool == "select" else QGraphicsView.NoDrag)
-        cur = {"select": None, "text": Qt.IBeamCursor, "code": Qt.IBeamCursor, "eraser": Qt.PointingHandCursor}
+        cur = {"select": None, "text": Qt.IBeamCursor, "code": Qt.IBeamCursor, "eraser": Qt.PointingHandCursor,
+               "gradient": Qt.PointingHandCursor}
         c = cur.get(tool, Qt.CrossCursor)
+        if tool == "gradient":  # aim it at what's selected (giving it a gradient if it hasn't one)
+            one = sc._single()
+            if one is not None:
+                if not sc.start_gradient(one):
+                    self.main.toast("Gradients work on shapes, text boxes and imported drawings")
+            else:
+                self.main.toast("Gradient: click a shape or text box")
+        else:
+            sc.grad_item = None
+        sc.update()
         if c is None:
             self.view.viewport().unsetCursor()
         else:
@@ -1828,10 +1985,66 @@ class EditorPage(QWidget):
         self.scene.add_image(h, w, hh, "Pasted image", at=pos)
         self.set_tool("select")
 
-    def _drop_files(self, paths, pos):
+    def import_pdf(self, path=None, pos=None):
+        """Brings one PDF page in as editable items (paths, text boxes, pictures), fitted onto the page."""
+        if path is None:
+            path, _ = QFileDialog.getOpenFileName(self, "Import PDF or SVG as editable shapes", "", VECTOR_FILTER)
+            if not path:
+                return []
+        from .. import pdfimport
+        from ..widgets.pdfpage import choose_page
+        picked = choose_page(self, path)
+        if picked is None:
+            return []
+        index, grouped = picked
+        sc = self.scene
+        k = sc.page_at(pos.y()) if pos is not None else sc.current_page
+        page = sc.page_rects()[k]
+        box = page.adjusted(page.width() * 0.04, page.height() * 0.04, -page.width() * 0.04, -page.height() * 0.04)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            items, notes = pdfimport.page_items(path, index, context.store, box)
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "Import", f"This file couldn't be read:\n{e}")
+            return []
+        QApplication.restoreOverrideCursor()
+        if not items:
+            self.main.toast("Nothing to bring over — " + (notes[0] if notes else "the page is empty"))
+            return []
+        if grouped and len(items) > 1:
+            gid = short_id()
+            for d in items:
+                d["group"] = gid
+        out = sc.paste_dicts(items, offset=0)
+        self.set_tool("select")
+        what = "The SVG" if Path(path).suffix.lower() in SVG_EXTS else f"Page {index + 1}"
+        msg = f"{what} came in as {len(out)} editable piece{'s' if len(out) != 1 else ''}"
+        if grouped and len(out) > 1:
+            msg += " — Ctrl+Shift+G takes them apart"
+        if notes:
+            msg += " (" + "; ".join(notes) + ")"
+        self.main.toast(msg)
+        self.inspector.refresh()
+        return out
+
+    def _drop_files(self, paths, pos, svg_as="shapes"):
         x = 0
         for p in paths:
-            if Path(p).suffix.lower() in IMAGE_EXTS:
+            ext = Path(p).suffix.lower()
+            if ext == ".pdf" or (ext in SVG_EXTS and svg_as == "shapes"):
+                self.import_pdf(p, pos)
+            elif ext in SVG_EXTS:  # as a plain picture, drawn sharp at a large size
+                from .. import pdfimport
+                try:
+                    img = pdfimport.svg_image(p, 2400)
+                except Exception:
+                    self.main.toast(f"{Path(p).name} can't be read")
+                    continue
+                h, w, hh = media.import_qimage(context.store, img, Path(p).stem + ".png")
+                self.scene.add_image(h, w, hh, Path(p).name, at=QPointF(pos.x() + x, pos.y() + x))
+                x += 30
+            elif ext in IMAGE_EXTS:
                 r = media.import_image_file(context.store, p)
                 if r:
                     h, w, hh = r
@@ -1844,7 +2057,7 @@ class EditorPage(QWidget):
     def insert_image(self):
         paths, _ = QFileDialog.getOpenFileNames(self, "Insert pictures", "", IMAGE_FILTER)
         if paths:
-            self._drop_files(paths, self.scene.page_center())
+            self._drop_files(paths, self.scene.page_center(), svg_as="picture")
 
     def replace_image(self):
         sel = [i for i in self.scene.selectedItems() if isinstance(i, SlideImage)]
@@ -1934,6 +2147,105 @@ class EditorPage(QWidget):
             it.set_crop(d.result_crop())
             self.scene.push_state()
 
+    def predict_shapes(self, item):
+        """Redraws a picture as editable pieces (Settings → Co-Investigator → Image to shape prediction): the pieces
+        come in as one group exactly over the picture, and the picture is hidden underneath (Undo brings it back,
+        or right-click → Show hidden items)."""
+        from PySide6.QtWidgets import QProgressDialog
+        from .. import shapes
+        if getattr(self, "_prediction", None) is not None:
+            self.main.toast("Already predicting shapes for a picture — wait for it to finish")
+            return
+        path = context.store.asset_path(item.asset) if item.asset else None
+        img = media.load_image(path) if path and path.exists() else QImage()
+        if img.isNull():
+            QMessageBox.warning(self, "Predict Shapes", "This picture's file couldn't be found.")
+            return
+        k = img.width() / max(1.0, item.iw)
+        cx, cy, cw, ch = item.crop
+        img = img.copy(round(cx * k), round(cy * k), max(1, round(cw * k)), max(1, round(ch * k)))  # what's shown
+        cfg = shapes.config()
+        job = shapes.Prediction("", (item.x(), item.y(), item.w, item.h), cfg)
+        src = job.tmp / "picture.png"
+        img.save(str(src), "PNG")
+        job.image_path = str(src)
+        dlg = QProgressDialog(f"Predicting shapes with {shapes.describe(cfg)}…", "Cancel", 0, 0, self)
+        dlg.setWindowTitle("Predict Shapes")
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.setMinimumWidth(420)
+        self._prediction = job
+
+        def finish():
+            self._prediction = None  # first: closing the dialog reports "canceled" too
+            dlg.close()
+            QTimer.singleShot(2000, job.cleanup)
+
+        def cancel():
+            if self._prediction is job:
+                job.cancel()
+                finish()
+                self.main.toast("Predict Shapes cancelled")
+
+        def failed(msg):
+            finish()
+            QMessageBox.warning(self, "Predict Shapes", msg)
+
+        def done(result):
+            items = result.get("items") or []
+            for d in items:
+                if d.get("type") == "image" and d.get("file"):  # cut-out pictures go into the library
+                    r = media.import_image_file(context.store, d.pop("file"))
+                    if r:
+                        d["asset"], d["iw"], d["ih"] = r
+                        d["crop"] = [0, 0, r[1], r[2]]
+            items = [d for d in items if d.get("type") != "image" or d.get("asset")]
+            finish()
+            if not items:
+                self.main.toast("No shapes were found in this picture")
+                return
+            gid = short_id()
+            for d in items:
+                d["group"] = gid
+            if item.scene() is self.scene:
+                item.setSelected(False)
+                item.setVisible(False)  # kept underneath, hidden: one Undo puts everything back
+            self.scene.paste_dicts(items, offset=0)
+            self.set_tool("select")
+            msg = f"{len(items)} pieces from {result.get('engine') or 'the built-in model'}, traced from the picture"
+            if result.get("fallback"):
+                msg = result["fallback"] + f", so the built-in model made these {len(items)} pieces"
+            self.main.toast(msg + " · the picture is hidden underneath (Ctrl+Z or Show hidden items brings it "
+                            "back) · Ctrl+Shift+G takes them apart", 9000)
+            self.inspector.refresh()
+
+        job.status.connect(dlg.setLabelText)
+        job.done.connect(done)
+        job.failed.connect(failed)
+        dlg.canceled.connect(cancel)
+        dlg.show()
+        job.start()
+
+    def edit_points(self, item):
+        """Edit points on anything with an outline: shapes, lines and pen strokes first become freeform paths."""
+        sc = self.scene
+        if sc.start_point_edit(item):
+            self.main.toast("Drag a corner to move it · drag an edge to curve it · click an edge to add a corner · "
+                            "Delete removes the picked corner · Esc when done", 6000)
+            self.view.setFocus()
+            self.inspector.refresh()
+        else:
+            self.main.toast("This has no outline to edit")
+
+    def close_path(self, item, on, push=True):
+        """Closes a path into a shape (giving it a fill if it had none, ready for a gradient) or opens it."""
+        item.set_closed(on)
+        if on and not item.fill:
+            item.fill = self.scene.opts["shape_fill"]
+            item._changed()
+        if push:
+            self.scene.push_state()
+
     def _punch(self, shape):
         if self.scene.punch_zoom(shape) is not None:
             self.main.toast("Zoomed in — drag the outline on the picture to change what's magnified")
@@ -1949,9 +2261,27 @@ class EditorPage(QWidget):
                 m.addAction(theme.icon("crop", 16), "Crop…", lambda: self.crop_item(item))
                 m.addAction(theme.icon("image", 16), "Replace…", self.replace_image)
                 m.addAction(theme.icon("callout", 16), "Zoom into part of this picture…", self.start_zoom_tool)
+                m.addAction(theme.icon("shape_rect", 16), "Predict Shapes", lambda: self.predict_shapes(item))
             if isinstance(item, SlideShape) and sc.picture_under(sc._box(item), (item,)) is not None:
                 m.addAction(theme.icon("callout", 16), "Punch && Zoom: magnify what's under this shape",
                             lambda: self._punch(item))
+            if isinstance(item, (SlideShape, SlideLine, SlideStroke)) and not item.locked:
+                m.addAction(theme.icon("edit", 16), "Edit points (turns it into a freeform shape)",
+                            lambda: self.edit_points(item))
+            if isinstance(item, SlidePath) and not item.locked:
+                m.addAction(theme.icon("edit", 16), "Edit points", lambda: self.edit_points(item))
+                sm = m.addAction("Smooth curves")
+                sm.setCheckable(True)
+                sm.setChecked(item.smooth)
+                sm.toggled.connect(lambda on: (setattr(item, "smooth", on), item._changed(), sc.push_state(),
+                                               self.inspector.refresh()))
+                closed = item.is_closed()
+                m.addAction("Open the shape (make it a line)" if closed else "Close the shape",
+                            lambda: (self.close_path(item, not closed), self.inspector.refresh()))
+            if isinstance(item, SlidePath) and len([p for p in item.subpaths() if len(p) > 1]) > 1:
+                n = len([p for p in item.subpaths() if len(p) > 1])
+                m.addAction(theme.icon("ungroup", 16), f"Split apart into {n} pieces",
+                            lambda: (sc.split_path(item), self.inspector.refresh()))
             m.addSeparator()
             m.addAction(theme.icon("cut", 16), "Cut", lambda: self.command("cut"))
             m.addAction(theme.icon("copy", 16), "Copy", lambda: self.command("copy"))
@@ -1974,6 +2304,8 @@ class EditorPage(QWidget):
         else:
             m.addAction(theme.icon("paste", 16), "Paste", lambda: self.command("paste"))
             m.addAction(theme.icon("image", 16), "Insert picture…", self.insert_image)
+            m.addAction(theme.icon("pdf", 16), "Import PDF or SVG as editable shapes…",
+                        lambda p=QPointF(sc.ctx_pos): self.import_pdf(None, p))
             m.addAction(theme.icon("selectall", 16), "Select all", lambda: self.command("selectall"))
             hidden = [i for i in sc.slide_items() if not i.isVisible()]
             if hidden:

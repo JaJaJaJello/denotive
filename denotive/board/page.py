@@ -758,6 +758,50 @@ class BoardPage(QWidget):
             if snap:
                 evidence.reveal(snap)
 
+    def import_pdf_evidence(self, spos, path=None):
+        """A PDF page as a new evidence slide whose lines, fills, text and pictures are separate editable pieces."""
+        if path is None:
+            path, _ = QFileDialog.getOpenFileName(self, "Import PDF or SVG as editable evidence", "",
+                                                  "PDF or SVG (*.pdf *.svg *.svgz);;All files (*)")
+            if not path:
+                return None
+        from .. import pdfimport
+        from ..widgets.pdfpage import choose_page
+        picked = choose_page(self, path, show_group=False)
+        if picked is None:
+            return None
+        index = picked[0]
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            doc, notes = pdfimport.page_doc(path, index, context.store)
+            many = pdfimport.page_count(path) > 1
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "Import", f"This file couldn't be read:\n{e}")
+            return None
+        QApplication.restoreOverrideCursor()
+        title = Path(path).stem + (f" (page {index + 1})" if many else "")
+        iid = evidence.new_evidence(self.board["id"], spos, title, doc)
+        it = self.scene.add_existing(iid)
+        if it is not None:
+            self.pulse(it)
+        n = len(doc["items"])
+        self.main.toast(f"{title}: {n} editable piece{'s' if n != 1 else ''} — open the card to edit them"
+                        + (" (" + "; ".join(notes) + ")" if notes else ""))
+        return iid
+
+    def pdf_card_as_evidence(self, it):
+        """The PDF behind a file card, one page at a time, as editable evidence placed beside the card."""
+        p = Path(it.data.get("path") or "")
+        if not p.exists():
+            snap = evidence.snapshot_copy(it.id)
+            if not snap:
+                self.main.toast("That file can't be found")
+                return None
+            p = Path(snap)
+        r = it.scene_rect()
+        return self.import_pdf_evidence(QPointF(r.right() + 190, r.center().y()), str(p))
+
     def update_snapshot(self, it):
         r = evidence.update_file_snapshot(it.id)
         if r == "updated":
@@ -1036,6 +1080,8 @@ class BoardPage(QWidget):
                 sh.addAction(theme.icon("shape_" + k, 16), n, lambda kk=k: self._create("shape:" + kk, spos, spos))
             m.addAction(theme.icon("tool_frame", 16), "Add frame", lambda: self._create("frame", spos, spos))
             m.addAction(theme.icon("attach", 16), "Attach files…", self._attach_at(spos))
+            m.addAction(theme.icon("pdf", 16), "Import PDF or SVG as editable evidence…",
+                        lambda: self.import_pdf_evidence(spos))
             self._link_menu(m, spos)
             m.addSeparator()
             m.addAction(theme.icon("paste", 16), "Paste", lambda: self.paste(spos))
@@ -1081,6 +1127,11 @@ class BoardPage(QWidget):
                 m.addAction(theme.icon("openfile", 16), "Open", lambda: self.open_file(it))
                 m.addAction(theme.icon("view", 16), "View contents", lambda: self.view_file(it))
                 m.addAction(theme.icon("folderopen", 16), "Show in folder", lambda: self.reveal_file(it))
+                fname = str(it.data.get("path") or it.data.get("name") or "").lower()
+                if fname.endswith((".pdf", ".svg", ".svgz")):
+                    m.addAction(theme.icon("pdf", 16), "Open a page as editable evidence…" if fname.endswith(".pdf")
+                                else "Open as editable evidence…",
+                                lambda: self.pdf_card_as_evidence(it))
                 m.addAction(theme.icon("refresh", 16), "Update snapshot from original", lambda: self.update_snapshot(it))
                 m.addAction(theme.icon("history", 16), "Snapshot history", lambda: self.show_history(it))
                 m.addSeparator()

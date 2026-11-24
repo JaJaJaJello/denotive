@@ -91,11 +91,26 @@ def _selftest(app, w, out_dir):
         lines.append(f"board items: {len(context.store.items(bid))}")
         lines.append(f"pdf pages: {export.export_pdf(str(out / 'selftest.pdf'), [bid])}")
         lines.append(f"pptx slides: {export.export_pptx(str(out / 'selftest.pptx'), [bid])}")
+        from PySide6.QtCore import QRectF
+        from . import pdfimport  # reads the PDF just written back in as pieces (PDFium bundled and working)
+        pieces, _ = pdfimport.page_items(str(out / "selftest.pdf"), 0, None, QRectF(0, 0, 1280, 720))
+        lines.append(f"pdf import pieces: {len(pieces)}")
+        svg = out / "selftest.svg"  # SVG goes through Qt's SVG module into the same importer
+        svg.write_text('<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100" viewBox="0 0 200 100">'
+                       '<rect x="10" y="10" width="80" height="60" fill="#e5484d"/>'
+                       '<circle cx="150" cy="50" r="30" fill="none" stroke="#0090ff" stroke-width="4"/>'
+                       '<text x="20" y="92" font-family="Arial" font-size="12">Self test</text></svg>',
+                       encoding="utf-8")
+        pieces, _ = pdfimport.page_items(str(svg), 0, None, QRectF(0, 0, 1280, 720))
+        lines.append(f"svg import pieces: {len(pieces)} ({', '.join(sorted({d['type'] for d in pieces}))})")
         w.grab().save(str(out / "selftest.png"))
         from .ai import casefile, providers
         lines.append(f"case file chars: {len(casefile.board_case(bid, images=True).text)}")
         lines.append(f"claude app found: {bool(providers.find_claude())}")
         lines.append(f"codex tool found: {bool(providers.find_codex())}")
+        from . import shapes  # Predict Shapes: the Vectorizer folder and a Python that can run it
+        ready, msg = shapes.readiness()
+        lines.append(f"predict shapes: {'ready' if ready else 'not ready'} — {msg.splitlines()[0]}")
         os.environ.setdefault("ANTHROPIC_API_KEY", "selftest-not-a-key")
         try:
             providers.make({"provider": "anthropic", "model": "x"}).list_models()

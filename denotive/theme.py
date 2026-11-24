@@ -2,8 +2,8 @@
 import math
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import (QBrush, QColor, QFont, QFontDatabase, QIcon, QPainter, QPainterPath, QPen, QPixmap,
-                           QRadialGradient)
+from PySide6.QtGui import (QBrush, QColor, QFont, QFontDatabase, QIcon, QLinearGradient, QPainter, QPainterPath, QPen,
+                           QPixmap, QRadialGradient)
 
 from . import geometry
 
@@ -328,8 +328,41 @@ def _draw_group(ungroup):
     return draw
 
 
+def _draw_gradient(p, s, color):
+    """A box fading from solid to clear, with the two edge lines of the gradient."""
+    r = QRectF(s * 0.12, s * 0.2, s * 0.76, s * 0.6)
+    g = QLinearGradient(QPointF(s * 0.3, 0), QPointF(s * 0.7, 0))
+    full, clear = QColor(color), QColor(color)
+    clear.setAlpha(25)
+    g.setColorAt(0, full)
+    g.setColorAt(1, clear)
+    p.setPen(QPen(QColor(color), s * 0.06))
+    p.setBrush(QBrush(g))
+    p.drawRoundedRect(r, s * 0.06, s * 0.06)
+    _pen(p, color, s * 0.05)
+    p.drawLine(QPointF(s * 0.3, s * 0.1), QPointF(s * 0.3, s * 0.9))
+    p.drawLine(QPointF(s * 0.7, s * 0.1), QPointF(s * 0.7, s * 0.9))
+
+
+def _draw_freeform(p, s, color):
+    """A lopsided closed outline with dots on its corners."""
+    pts = [QPointF(s * x, s * y) for x, y in ((0.14, 0.62), (0.3, 0.2), (0.56, 0.34), (0.86, 0.16), (0.8, 0.74),
+                                             (0.44, 0.86))]
+    path = QPainterPath(pts[0])
+    for q in pts[1:]:
+        path.lineTo(q)
+    path.closeSubpath()
+    _pen(p, color, s * 0.07)
+    p.setBrush(Qt.NoBrush)
+    p.drawPath(path)
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(color))
+    for q in pts:
+        p.drawEllipse(q, s * 0.07, s * 0.07)
+
+
 CUSTOM = {
-    "sparkle": _draw_sparkle, "coinv": _draw_coinv, "group": _draw_group(False), "ungroup": _draw_group(True),
+    "sparkle": _draw_sparkle, "gradient": _draw_gradient, "freeform": _draw_freeform, "coinv": _draw_coinv, "group": _draw_group(False), "ungroup": _draw_group(True),
     "superscript": _draw_script(True), "subscript": _draw_script(False), "callout": _draw_callout,
     "alignjustify": _draw_justify,
     "tool_text": _draw_text_tool, "tool_line": _draw_line_tool, "tool_arrow": _draw_arrow_tool,

@@ -13,11 +13,11 @@ if /i "%OUT%"=="dist" (
 )
 if not exist .venv (
     python -m venv .venv
-    .venv\Scripts\python.exe -m pip install PySide6-Essentials python-pptx pillow numpy pyinstaller
+    .venv\Scripts\python.exe -m pip install PySide6-Essentials python-pptx pillow numpy pypdfium2 pyinstaller
 )
 if not exist assets\icon.ico .venv\Scripts\python.exe make_icon.py
 .venv\Scripts\pyinstaller.exe --noconfirm --clean --windowed --name DeNotive --icon assets\icon.ico ^
-    --distpath "%OUT%" --add-data "assets;assets" --collect-data pptx ^
+    --distpath "%OUT%" --add-data "assets;assets" --collect-data pptx --copy-metadata pypdfium2 ^
     --exclude-module tkinter --exclude-module numpy --exclude-module PySide6.QtNetwork ^
     --exclude-module PySide6.QtQml --exclude-module PySide6.QtQuick --exclude-module PySide6.QtOpenGL ^
     run.py

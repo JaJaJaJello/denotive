@@ -3,12 +3,12 @@ import json
 import math
 
 from PySide6.QtCore import QLineF, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPen, QTextCursor
+from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QTextCursor
 from PySide6.QtWidgets import QApplication, QGraphicsScene
 
 from .. import geometry, theme
-from .items import (GAP_COLOR, PAGE_GAP, SlideImage, SlideItem, SlideLine, SlideShape, SlideStroke, SlideText,
-                    SlideZoom, TextBearing, item_from_dict, make_pen, short_id)
+from .items import (GAP_COLOR, PAGE_GAP, SlideImage, SlideItem, SlideLine, SlidePath, SlideShape, SlideStroke,
+                    SlideText, SlideZoom, TextBearing, default_grad, grad_geom, item_from_dict, make_pen, short_id)
 
 HANDLE_PX = 9
 HIT_PX = 8
@@ -25,6 +25,16 @@ ANCHORS = ((0, 0), (0.5, 0), (1, 0), (1, 0.5), (1, 1), (0.5, 1), (0, 1), (0, 0.5
 ANCHOR_PX = 11
 GLUED = QColor("#2fb36d")
 AREA_HANDLES = {"a_tl": (0, 0), "a_tr": (1, 0), "a_br": (1, 1), "a_bl": (0, 1)}
+GRAD_TYPES = (SlideShape, SlideText, SlidePath)  # things with a fill that can be a gradient
+GRAD_RING_PX = 22  # how far the gradient circle stands off the item's farthest corner
+
+
+def _seg_dist(p, a, b):
+    """Distance from point p to the segment a-b."""
+    vx, vy = b.x() - a.x(), b.y() - a.y()
+    L2 = vx * vx + vy * vy
+    t = 0.0 if L2 < 1e-9 else max(0.0, min(1.0, ((p.x() - a.x()) * vx + (p.y() - a.y()) * vy) / L2))
+    return math.hypot(p.x() - a.x() - t * vx, p.y() - a.y() - t * vy)
 
 
 def _no_snap():
@@ -66,6 +76,10 @@ class SlideScene(QGraphicsScene):
         self._carrying = set()  # items moving together right now: their stuck lines move with them anyway
         self._anchor_hint = None  # (item, (u, v) or None): sticking points to show while drawing a line
         self.pick = None  # (line, "g1" | "g2") while waiting for a click on the object to attach to
+        self.grad_item = None  # the item whose gradient the Gradient tool is aiming
+        self.ff = None  # the Freeform tool's corners so far
+        self.pe = None  # editing a path's corners: {"item", "sel": index of the picked corner, "drag"}
+        self._gx = None  # a gradient handle being dragged
         self.ctx_pos = QPointF()
         self.current_page = 0
         self.page_w, self.page_h = 1280.0, 720.0
@@ -399,6 +413,7 @@ class SlideScene(QGraphicsScene):
         return True
 
     def _restore(self, s):
+        self.ff = self.pe = None  # undo / redo swap in new items
         sel = {it.uid for it in self.selectedItems() if isinstance(it, SlideItem)}
         d = json.loads(s)
         d["notes"] = self.notes
@@ -623,6 +638,166 @@ class SlideScene(QGraphicsScene):
             return Qt.SizeVerCursor
         return Qt.SizeBDiagCursor
 
+    # ------------------------------------------------------------------ gradient tool
+    def grad_target(self):
+        """The item whose gradient circle shows: the one clicked with the Gradient tool (or the one selected item)."""
+        if self.tool != "gradient" or self.editing is not None:
+            return None
+        it = self.grad_item
+        if it is None or it.scene() is not self or not it.isSelected():
+            it = self._single()
+        if isinstance(it, GRAD_TYPES) and it.grad and it.fill and not it.locked and it.isVisible():
+            return it
+        return None
+
+    def start_gradient(self, it):
+        """Aims the Gradient tool at an item, giving it a gradient made from its fill if it hasn't one yet.
+        False if this kind of item can't have one."""
+        if not isinstance(it, GRAD_TYPES) or it.locked:
+            return False
+        self.grad_item = it
+        if not it.grad:
+            it.set_grad(default_grad(it.fill or self.opts["shape_fill"], it.w, it.h))
+            self.push_state()
+        self.update()
+        return True
+
+    def grad_parts(self, it):
+        """The gradient circle in scene coordinates: centre, radius, the two edge lines (end, end, grip) and the
+        turning knob on the ring."""
+        g = it.grad
+        s = max(0.05, self.view_scale)
+        c, (dx, dy), L, _, _ = grad_geom(g, it.w, it.h)
+        R = max(math.hypot(c.x() - x, c.y() - y) for x, y in ((0, 0), (it.w, 0), (0, it.h), (it.w, it.h)))
+        R += GRAD_RING_PX / s
+        nx, ny = -dy, dx
+        out = {"c": it.mapToScene(c), "R": R, "knob": it.mapToScene(QPointF(c.x() + R * dx, c.y() + R * dy))}
+        for k in ("a", "b"):
+            o = float(g[k]) * L
+            half = max(math.sqrt(max(R * R - o * o, 0.0)), 26 / s)  # a chord of the circle (kept visible outside it)
+            m = QPointF(c.x() + o * dx, c.y() + o * dy)
+            grip = 0.55 * half  # partway along the line, clear of the centre dot
+            out[k] = (it.mapToScene(QPointF(m.x() - half * nx, m.y() - half * ny)),
+                      it.mapToScene(QPointF(m.x() + half * nx, m.y() + half * ny)),
+                      it.mapToScene(QPointF(m.x() - grip * nx, m.y() - grip * ny)))
+        return out
+
+    def grad_hit(self, pos):
+        """Which part of the gradient circle is under pos: "c" centre, "a"/"b" an edge line, "ring", or None."""
+        it = self.grad_target()
+        if it is None:
+            return None
+        gp = self.grad_parts(it)
+        tol = HIT_PX / max(0.05, self.view_scale)
+        if QLineF(gp["c"], pos).length() <= tol * 1.1:
+            return "c"
+        for k in ("b", "a"):
+            if QLineF(gp[k][2], pos).length() <= tol * 1.2:
+                return k
+        for k in ("b", "a"):
+            if _seg_dist(pos, gp[k][0], gp[k][1]) <= tol * 0.75:
+                return k
+        if QLineF(gp["knob"], pos).length() <= tol * 1.3 or abs(QLineF(gp["c"], pos).length() - gp["R"]) <= tol:
+            return "ring"
+        return None
+
+    def grad_cursor(self, part):
+        return {"c": Qt.SizeAllCursor, "a": Qt.SplitHCursor, "b": Qt.SplitHCursor,
+                "ring": Qt.OpenHandCursor}.get(part)
+
+    def _begin_grad(self, it, part, pos):
+        loc = it.mapFromScene(pos)
+        c = grad_geom(it.grad, it.w, it.h)[0]
+        self._gx = {"item": it, "part": part, "g0": dict(it.grad, c=list(it.grad["c"])),
+                    "a0": math.atan2(loc.y() - c.y(), loc.x() - c.x())}
+        for v in self.views():
+            if part == "ring":
+                v.viewport().setCursor(Qt.ClosedHandCursor)
+
+    def _update_grad(self, pos, mods):
+        x = self._gx
+        it, part = x["item"], x["part"]
+        g = dict(x["g0"], c=list(x["g0"]["c"]))
+        loc = it.mapFromScene(pos)
+        s = max(0.05, self.view_scale)
+        free = bool(mods & Qt.AltModifier)
+        if part == "c":
+            fx, fy = loc.x() / max(1.0, it.w), loc.y() / max(1.0, it.h)
+            if not free and math.hypot(loc.x() - it.w / 2, loc.y() - it.h / 2) <= SNAP_PX / s:
+                fx, fy = 0.5, 0.5  # back on the middle
+            g["c"] = [round(fx, 5), round(fy, 5)]
+        elif part in ("a", "b"):
+            c, (dx, dy), L, _, _ = grad_geom(g, it.w, it.h)
+            o = (loc.x() - c.x()) * dx + (loc.y() - c.y()) * dy
+            if not free:  # snaps to the item's edges (as seen along the direction) and to the centre
+                spots = [0.0] + [(x0 - c.x()) * dx + (y0 - c.y()) * dy
+                                 for x0, y0 in ((0, 0), (it.w, 0), (0, it.h), (it.w, it.h))]
+                near = min(spots, key=lambda v: abs(v - o))
+                if abs(near - o) <= SNAP_PX / s:
+                    o = near
+            other = g["b" if part == "a" else "a"] * L
+            if abs(o - other) < 2:  # the two edges never quite meet
+                o = other + (2 if part == "b" else -2) * (1 if g["b"] >= g["a"] else -1)
+            g[part] = round(o / L, 5)
+        elif part == "ring":
+            c = grad_geom(g, it.w, it.h)[0]
+            a = math.atan2(loc.y() - c.y(), loc.x() - c.x())
+            ang = x["g0"]["ang"] + math.degrees(a - x["a0"])
+            if mods & Qt.ShiftModifier:
+                ang = round(ang / 15.0) * 15.0
+            g["ang"] = round(ang % 360, 3)
+        it.set_grad(g)
+        self.update()
+
+    def _end_grad(self):
+        self._gx = None
+        for v in self.views():
+            v.viewport().setCursor(Qt.PointingHandCursor)
+        self.push_state()
+
+    def recentre_grad(self, it):
+        if it is not None and it.grad:
+            it.set_grad(dict(it.grad, c=[0.5, 0.5]))
+            self.push_state()
+            self.update()
+
+    def _draw_grad(self, p, it, s):
+        gp = self.grad_parts(it)
+        c, R = gp["c"], gp["R"]
+        halo = QPen(QColor(0, 0, 0, 120), 3.4)
+        halo.setCosmetic(True)
+        main = QPen(QColor(theme.SELECT), 1.6)
+        main.setCosmetic(True)
+        p.setBrush(Qt.NoBrush)
+        for pen in (halo, main):
+            p.setPen(pen)
+            p.drawEllipse(c, R, R)
+            for k in ("a", "b"):
+                p.drawLine(gp[k][0], gp[k][1])
+        dot = QPen(QColor(theme.SELECT), 1.2, Qt.DotLine)
+        dot.setCosmetic(True)
+        p.setPen(dot)
+        p.drawLine(c, gp["knob"])  # which way the colours run
+        p.setPen(QPen(QColor("#ffffff"), 1.4))
+        p.setBrush(QColor(theme.SELECT))
+        p.drawEllipse(gp["knob"], 6.5 / s, 6.5 / s)
+        edge = QPen(QColor("#ffffff"), 1.6)
+        edge.setCosmetic(True)
+        for k, col in (("a", it.grad["c1"]), ("b", it.grad["c2"])):
+            m = gp[k][2]
+            r = 6.5 / s
+            p.setPen(halo)
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(QRectF(m.x() - r, m.y() - r, 2 * r, 2 * r), r * 0.3, r * 0.3)
+            p.setPen(edge)
+            p.setBrush(QColor(col))
+            p.drawRoundedRect(QRectF(m.x() - r, m.y() - r, 2 * r, 2 * r), r * 0.3, r * 0.3)
+        p.setPen(main)
+        p.setBrush(QColor("#ffffff"))
+        p.drawEllipse(c, 5.5 / s, 5.5 / s)
+        p.drawLine(QPointF(c.x() - 2.5 / s, c.y()), QPointF(c.x() + 2.5 / s, c.y()))
+        p.drawLine(QPointF(c.x(), c.y() - 2.5 / s), QPointF(c.x(), c.y() + 2.5 / s))
+
     # ------------------------------------------------------------------ smart guides
     def _box(self, it):
         """The item's own outline as an upright scene rectangle (no shadow or selection slack)."""
@@ -817,6 +992,8 @@ class SlideScene(QGraphicsScene):
         groups = {g: m for g, m in groups.items() if len(m) > 1}
         p.setBrush(Qt.NoBrush)
         for it in sel:
+            if self.pe is not None and it is self.pe["item"]:
+                continue  # its corners are shown instead
             grouped = it.group in groups
             p.setPen(member if grouped else sp)
             if isinstance(it, SlideLine):
@@ -827,7 +1004,12 @@ class SlideScene(QGraphicsScene):
         for members in groups.values():
             p.drawRect(self._union(members))
         hs = HANDLE_PX / s
-        if self.editing is None:
+        gt = self.grad_target()
+        if gt is not None:
+            self._draw_grad(p, gt, s)
+        elif self.pe is not None:
+            self._draw_points(p, s)
+        elif self.editing is None:
             single = sel[0] if len(sel) == 1 else None
             target = single if single is not None else (GROUP if self.selected_group() else None)
             locked = single.locked if single is not None else any(i.locked for i in sel)
@@ -869,6 +1051,8 @@ class SlideScene(QGraphicsScene):
                 p.setPen(QColor(theme.SELECT))
                 tl = single.mapToScene(QPointF(single.w, 0))
                 p.drawText(QRectF(tl.x() + 2 / s, tl.y() - 16 / s, 16 / s, 16 / s), Qt.AlignCenter, theme.GLYPHS["lock"])
+        if self.ff is not None:
+            self._draw_freeform(p, s)
         # creation previews
         c = self._create
         if c is not None:
@@ -978,6 +1162,30 @@ class SlideScene(QGraphicsScene):
             self.stop_text_edit()
         tool = self.tool
         self._targets = None
+        if self.pe is not None:
+            if self.pe_press(pos):
+                e.accept()
+                return
+            self.stop_point_edit()  # clicked away from the corners: back to normal
+        if tool == "freeform":
+            self.ff_press(pos, e.modifiers())
+            e.accept()
+            return
+        if tool == "gradient":
+            part = self.grad_hit(pos)
+            if part is not None:
+                self._begin_grad(self.grad_target(), part, pos)
+            else:
+                it = self._item_at(pos)
+                self.clearSelection()
+                self.grad_item = None
+                if it is not None:
+                    it.setSelected(True)
+                    if not self.start_gradient(it):
+                        self.notice.emit("Gradients work on shapes, text boxes and imported drawings")
+            self.update()
+            e.accept()
+            return
         if tool == "select":
             it, h = self.handle_at(pos)
             if h is not None:
@@ -1011,6 +1219,18 @@ class SlideScene(QGraphicsScene):
 
     def mouseMoveEvent(self, e):
         pos = e.scenePos()
+        if self.pe is not None and self.pe["drag"] is not None:
+            self.pe_move(pos)
+            e.accept()
+            return
+        if self.tool == "freeform" and self.ff is not None:
+            self.ff_move(pos, e.buttons())
+            e.accept()
+            return
+        if self._gx is not None:
+            self._update_grad(pos, e.modifiers())
+            e.accept()
+            return
         if self._xf is not None:
             self._update_transform(pos, e.modifiers())
             e.accept()
@@ -1055,6 +1275,21 @@ class SlideScene(QGraphicsScene):
         super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e):
+        if self.pe is not None and self.pe["drag"] is not None:
+            self.pe_release()
+            e.accept()
+            return
+        if self.tool == "freeform":
+            self.ff_release(e.scenePos())
+            e.accept()
+            return
+        if self._gx is not None:
+            self._end_grad()
+            e.accept()
+            return
+        if self.tool == "gradient":
+            e.accept()
+            return
         if self._xf is not None:
             x, self._xf = self._xf, None
             if x["handle"] in ("p1", "p2") and "glue" in x:  # sticks to the corner/middle it was dropped on
@@ -1085,7 +1320,24 @@ class SlideScene(QGraphicsScene):
         if e.button() != Qt.LeftButton:
             return super().mouseDoubleClickEvent(e)
         pos = e.scenePos()
+        if self.tool == "freeform":
+            if self.ff is not None:
+                pts = self.ff["pts"]  # the second click of the double-click added a corner on top of the last
+                if len(pts) >= 2 and QLineF(pts[-1], pts[-2]).length() * max(0.05, self.view_scale) <= 4:
+                    pts.pop()
+                self.ff_finish(True)
+            e.accept()
+            return
+        if self.tool == "gradient":
+            if self.grad_hit(pos) == "c":
+                self.recentre_grad(self.grad_target())
+            e.accept()
+            return
         it = self._item_at(pos)
+        if isinstance(it, SlidePath) and self.tool == "select":
+            self.start_point_edit(it)
+            e.accept()
+            return
         if it is None and self.tool == "select" and self.page_containing(pos) is not None:
             # double-clicking empty page starts a text box right there
             self.clearSelection()
@@ -1103,6 +1355,329 @@ class SlideScene(QGraphicsScene):
             e.accept()
             return
         super().mouseDoubleClickEvent(e)
+
+    # ------------------------------------------------------------------ freeform shapes
+    def ff_point(self, pos, mods):
+        """Where a click puts the next corner: snapped to edges and centres (Alt: free); Shift keeps the new
+        side at 45-degree steps."""
+        ff = self.ff
+        if ff and ff["pts"] and mods & Qt.ShiftModifier:
+            a = ff["pts"][-1]
+            dx, dy = pos.x() - a.x(), pos.y() - a.y()
+            ang = round(math.atan2(dy, dx) / (math.pi / 4)) * (math.pi / 4)
+            r = math.hypot(dx, dy)
+            return QPointF(a.x() + r * math.cos(ang), a.y() + r * math.sin(ang))
+        if mods & Qt.AltModifier:
+            return QPointF(pos)
+        return self.snap_point(pos)
+
+    def ff_press(self, pos, mods=Qt.NoModifier):
+        s = max(0.05, self.view_scale)
+        ff = self.ff
+        if ff is None:
+            self.clearSelection()
+            self.ff = {"pts": [self.ff_point(pos, mods)], "press": QPointF(pos), "drag": False, "scribble": True,
+                       "hover": QPointF(pos), "smooth": False}
+            self.update()
+            return
+        if len(ff["pts"]) >= 3 and QLineF(ff["pts"][0], pos).length() * s <= HIT_PX + 2:
+            self.ff_finish(True)  # clicked the first corner again: close the shape
+            return
+        ff["pts"].append(self.ff_point(pos, mods))
+        ff.update(press=QPointF(pos), drag=False, scribble=False)
+        self.update()
+
+    def ff_move(self, pos, buttons=Qt.NoButton):
+        ff = self.ff
+        if ff is None:
+            return
+        s = max(0.05, self.view_scale)
+        if buttons & Qt.LeftButton:
+            if not ff["drag"] and QLineF(ff["press"], pos).length() * s > 4:
+                ff["drag"], ff["from"] = True, len(ff["pts"]) - 1
+            if ff["drag"] and QLineF(ff["pts"][-1], pos).length() * s >= 2:
+                ff["pts"].append(QPointF(pos))
+        ff["hover"] = QPointF(pos)
+        self.update()
+
+    def ff_release(self, pos=None):
+        ff = self.ff
+        if ff is None or not ff["drag"]:
+            return
+        s = max(0.05, self.view_scale)
+        k = ff.get("from", 0)
+        drawn = geometry.rdp([(q.x(), q.y()) for q in ff["pts"][k:]], 1.2 / s)  # keep only the corners that matter
+        ff["pts"] = ff["pts"][:k] + [QPointF(x, y) for x, y in drawn]
+        ff["drag"] = False
+        if ff["scribble"]:  # drawn in one stroke from the start: a freehand shape, closed and smoothed
+            ff["smooth"] = True
+            self.ff_finish(True)
+            return
+        self.update()
+
+    def ff_undo_point(self):
+        if self.ff is None:
+            return
+        self.ff["pts"].pop()
+        if not self.ff["pts"]:
+            self.ff = None
+        self.update()
+
+    def ff_finish(self, close):
+        """Turns the corners drawn so far into a path: a filled shape when closed (3+ corners), else an open
+        line (2+). Returns the new item, or None."""
+        ff, self.ff = self.ff, None
+        self.guides = []
+        self.update()
+        if ff is None:
+            return None
+        s = max(0.05, self.view_scale)
+        pts = []
+        for q in ff["pts"]:
+            if not pts or QLineF(pts[-1], q).length() * s > 1.5:
+                pts.append(q)
+        if close and len(pts) > 3 and QLineF(pts[0], pts[-1]).length() * s <= 2:
+            pts.pop()  # the last corner sits on the first
+        if len(pts) < 3:
+            close = False
+        if len(pts) < 2:
+            return None
+        segs = [["M", pts[0].x(), pts[0].y()]] + [["L", q.x(), q.y()] for q in pts[1:]]
+        if close:
+            segs.append(["Z"])
+            style = dict(fill=self.opts["shape_fill"], stroke=None, sw=0, cap="round")
+        else:
+            style = dict(fill=None, stroke=self.opts["line_color"], sw=self.opts["line_w"], cap="round")
+        d = SlidePath.from_segments(segs, dash="solid", rule="nonzero", smooth=ff["smooth"], **style)
+        it = item_from_dict(d)
+        self.add(it)
+        self.push_state()
+        self.tool_reset.emit()
+        return it
+
+    def _draw_freeform(self, p, s):
+        ff = self.ff
+        pts = list(ff["pts"])
+        if not ff["drag"] and ff.get("hover") is not None:
+            pts.append(ff["hover"])
+        path = QPainterPath(pts[0])
+        for q in pts[1:]:
+            path.lineTo(q)
+        if len(pts) >= 3:
+            fill = QColor(self.opts["shape_fill"])
+            fill.setAlpha(70)
+            p.setPen(Qt.NoPen)
+            p.setBrush(fill)
+            p.drawPath(path)
+        pen = QPen(QColor(theme.SELECT), 1.5)
+        pen.setCosmetic(True)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(path)
+        hs = HANDLE_PX / s
+        closing = len(ff["pts"]) >= 3 and ff.get("hover") is not None and \
+            QLineF(ff["pts"][0], ff["hover"]).length() * s <= HIT_PX + 2
+        for k, q in enumerate(ff["pts"]):
+            big = k == 0 and closing
+            p.setBrush(QColor(theme.SELECT) if big else QColor("#ffffff"))
+            r = hs * (0.62 if big else 0.36)
+            p.drawEllipse(q, r, r)
+
+    # ------------------------------------------------------------------ editing a path's corners
+    def to_path(self, it):
+        """Swaps a shape, line or pen stroke for the same drawing as a freeform path (same look, same place), so its
+        corners and edges can be edited. A shape's text moves into its own text box, grouped with the outline.
+        Returns the path item, or None for things that have no outline to edit."""
+        from .items import qpath_to_d
+        if isinstance(it, SlidePath):
+            return it
+        if it.locked or not isinstance(it, (SlideShape, SlideLine, SlideStroke)):
+            return None
+        base = it.to_dict()
+        keep = {k: base[k] for k in ("opacity", "z", "group") if k in base}
+        if isinstance(it, SlideShape):
+            segs = qpath_to_d(geometry.shape_path(it.shape_kind, QRectF(0, 0, it.w, it.h), it.radius))
+            d = dict(type="path", x=it.x(), y=it.y(), w=it.w, h=it.h, w0=it.w, h0=it.h, d=segs,
+                     rot=it.rotation(), fill=it.fill, stroke=it.stroke, sw=it.sw if it.stroke else 0,
+                     dash=it.dash, cap="butt", rule="nonzero")
+            if getattr(it, "grad", None) and it.fill:
+                d["grad"] = dict(it.grad)
+        elif isinstance(it, SlideLine):
+            a, b = it.mapToScene(it.p1), it.mapToScene(it.p2)
+            d = SlidePath.from_segments([["M", a.x(), a.y()], ["L", b.x(), b.y()]], fill=None, stroke=it.stroke,
+                                        sw=it.sw, dash=it.dash, cap="round", rule="nonzero")
+            if it.a1 or it.a2:
+                self.notice.emit("Arrowheads aren't kept once a line becomes an editable path")
+        else:
+            pts = [it.mapToScene(QPointF(u * it.w, v * it.h)) for u, v in it.pts]
+            if len(pts) < 2:
+                return None
+            segs = [["M", pts[0].x(), pts[0].y()]] + [["L", q.x(), q.y()] for q in pts[1:]]
+            color = QColor(it.color)
+            if it.hl:
+                color.setAlphaF(0.38)
+            d = SlidePath.from_segments(segs, fill=None, stroke=color.name(QColor.HexArgb if it.hl else QColor.HexRgb),
+                                        sw=it.sw, dash="solid", cap="butt" if it.hl else "round", rule="nonzero",
+                                        smooth=True)
+        d.update(keep, id=short_id())
+        text = it.text_content().strip() if isinstance(it, SlideShape) else ""
+        if text:  # the words get a text box of their own, centred where they were, moving with the outline
+            d["group"] = d.get("group") or short_id()
+        self._syncing = True
+        self.removeItem(it)
+        path = item_from_dict(d)
+        self.addItem(path)
+        path.renormalize()
+        if text:
+            box = SlideText({"x": it.x(), "y": it.y(), "w": it.w, "h": 24, "minh": 8, "rot": it.rotation(),
+                             "font": it.font_family, "size": it.font_px, "color": it.color,
+                             "html": it.text.toHtml(), "z": float(d.get("z", 0)) + 0.5, "group": d["group"]})
+            c = box.text.textCursor()
+            c.select(QTextCursor.Document)
+            fmt = c.blockFormat()
+            fmt.setAlignment(Qt.AlignHCenter)
+            c.mergeBlockFormat(fmt)
+            box.layout_children()
+            box.setPos(it.x(), it.y() + (it.h - box.h) / 2)
+            self.addItem(box)
+        self._syncing = False
+        self.push_state()
+        return path
+
+    def start_point_edit(self, it):
+        if it is not None and not isinstance(it, SlidePath):
+            it = self.to_path(it)
+        if not isinstance(it, SlidePath) or it.locked or not it.vertex_indices():
+            return False
+        self.ff = None
+        self._syncing = True
+        self.clearSelection()
+        it.setSelected(True)
+        self._syncing = False
+        self._prev_sel = {it}
+        self.pe = {"item": it, "sel": None, "drag": None}
+        self.update()
+        return True
+
+    def stop_point_edit(self):
+        if self.pe is not None:
+            self.pe = None
+            self.update()
+
+    def pe_vertex_at(self, pos):
+        it, s = self.pe["item"], max(0.05, self.view_scale)
+        best = None
+        for i in it.vertex_indices():
+            dist = QLineF(it.mapToScene(it.vertex(i)), pos).length() * s
+            if dist <= HIT_PX and (best is None or dist < best[0]):
+                best = (dist, i)
+        return best[1] if best else None
+
+    def pe_edge_at(self, pos):
+        """(edge index, t, point on it in item coordinates) for the outline under pos, or None."""
+        it, s = self.pe["item"], max(0.05, self.view_scale)
+        q = it.mapFromScene(pos)
+        best = None
+        for end, a, c1, c2, b in it.edges():
+            steps = 24 if c1 is not None else 1
+            prev, pt0 = a, 0.0
+            for k in range(1, steps + 1):
+                t = k / steps
+                if c1 is None:
+                    cur = QPointF(a.x() + (b.x() - a.x()) * t, a.y() + (b.y() - a.y()) * t)
+                else:
+                    u = 1 - t
+                    cur = (a * (u * u * u) + c1 * (3 * u * u * t) + c2 * (3 * u * t * t) + b * (t * t * t))
+                seg = QLineF(prev, cur)
+                L2 = seg.dx() ** 2 + seg.dy() ** 2
+                f = 0.0 if L2 < 1e-9 else max(0.0, min(1.0, ((q.x() - prev.x()) * seg.dx() +
+                                                            (q.y() - prev.y()) * seg.dy()) / L2))
+                foot = QPointF(prev.x() + seg.dx() * f, prev.y() + seg.dy() * f)
+                dist = QLineF(foot, q).length() * s
+                if best is None or dist < best[0]:
+                    best = (dist, end, pt0 + (t - pt0) * f, foot)
+                prev, pt0 = cur, t
+        if best is None or best[0] > 7:
+            return None
+        return best[1], best[2], best[3]
+
+    def pe_press(self, pos):
+        """True when the click was about the corners (picked one, or added one on an edge)."""
+        i = self.pe_vertex_at(pos)
+        if i is not None:
+            self.pe["sel"] = i
+            self.pe["drag"] = {"kind": "corner", "moved": False}
+            self.update()
+            return True
+        hit = self.pe_edge_at(pos)
+        if hit is None:
+            return False
+        end, t, q = hit
+        self.pe["drag"] = {"kind": "edge", "moved": False, "end": end, "t": t, "at": q, "press": QPointF(pos)}
+        self.update()
+        return True
+
+    def pe_move(self, pos):
+        pe = self.pe
+        if pe is None or pe["drag"] is None:
+            return
+        it, drag = pe["item"], pe["drag"]
+        if drag["kind"] == "edge":
+            if not drag["moved"] and QLineF(drag["press"], pos).length() * max(0.05, self.view_scale) < 3:
+                return  # still a click
+            pe["sel"] = None
+            drag["end"] = it.bend_edge(drag["end"], drag["t"], it.mapFromScene(pos))
+        elif pe["sel"] is not None:
+            it.move_vertex(pe["sel"], it.mapFromScene(pos))
+        drag["moved"] = True
+        self.update()
+
+    def pe_release(self):
+        pe = self.pe
+        if pe is None or pe["drag"] is None:
+            return
+        drag, pe["drag"] = pe["drag"], None
+        it = pe["item"]
+        if drag["kind"] == "edge" and not drag["moved"]:  # a click on an edge: a new corner right there
+            pe["sel"] = it.insert_vertex(drag["end"], drag["at"], drag["t"])
+            self.push_state()
+        elif drag["moved"]:
+            it.renormalize()
+            self.push_state()
+        self.update()
+
+    def pe_delete(self):
+        pe = self.pe
+        if pe is None or pe["sel"] is None:
+            return False
+        if not pe["item"].delete_vertex(pe["sel"]):
+            self.notice.emit("A shape needs at least three corners, a line two")
+            return False
+        pe["sel"] = None
+        pe["item"].renormalize()
+        self.push_state()
+        self.update()
+        return True
+
+    def _draw_points(self, p, s):
+        it = self.pe["item"]
+        if it.scene() is not self:
+            self.pe = None
+            return
+        pen = QPen(QColor(theme.SELECT), 1.2, Qt.DashLine)
+        pen.setCosmetic(True)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        for end, a, c1, c2, b in it.edges():
+            p.drawLine(it.mapToScene(a), it.mapToScene(b))
+        hs = HANDLE_PX / s * 0.8
+        solid = QPen(QColor(theme.SELECT), 1.3)
+        solid.setCosmetic(True)
+        p.setPen(solid)
+        for i in it.vertex_indices():
+            q = it.mapToScene(it.vertex(i))
+            p.setBrush(QColor(theme.SELECT) if i == self.pe["sel"] else QColor("#ffffff"))
+            p.drawRect(QRectF(q.x() - hs / 2, q.y() - hs / 2, hs, hs))
 
     def _item_at(self, pos):
         for it in self.items(pos):
@@ -1413,6 +1988,41 @@ class SlideScene(QGraphicsScene):
         if sel:
             self.push_state()
 
+    def split_path(self, it):
+        """Breaks an imported path into one item per separate part (e.g. each marker of a plot series)."""
+        parts = [p for p in it.subpaths() if len(p) > 1]
+        if len(parts) < 2 or len(parts) > 3000:
+            return []
+        sx = it.w / it.w0 if it.w0 > 1e-6 else 1.0
+        sy = it.h / it.h0 if it.h0 > 1e-6 else 1.0
+        base = it.to_dict()
+        style = {k: base[k] for k in ("fill", "stroke", "sw", "dash", "rule", "cap")}
+        dicts = []
+        for part in parts:
+            segs = [[s[0]] + [v * (sx if i % 2 == 0 else sy) for i, v in enumerate(s[1:])] for s in part]
+            d = SlidePath.from_segments(segs, **style)  # still in the original item's own coordinates
+            centre = it.mapToScene(QPointF(d["x"] + d["w"] / 2, d["y"] + d["h"] / 2))  # rotation included
+            d.update(id=short_id(), x=centre.x() - d["w"] / 2, y=centre.y() - d["h"] / 2, rot=base["rot"],
+                     opacity=base["opacity"], group=base.get("group"), locked=False, hidden=False)
+            dicts.append(d)
+        self._syncing = True
+        self.clearSelection()
+        z0 = it.zValue()
+        self.removeItem(it)
+        out = []
+        for k, d in enumerate(dicts):
+            d["z"] = z0 + k / (len(dicts) + 1)  # stays at the same depth among the other items
+            new = item_from_dict(d)
+            if new is not None:
+                self.addItem(new)
+                new.setSelected(True)
+                out.append(new)
+        self._syncing = False
+        self._prev_sel = set(self.selected())
+        self.selectionChanged.emit()
+        self.push_state()
+        return out
+
     def nudge(self, dx, dy):
         sel = [i for i in self.selected() if not i.locked]
         self._carrying = set(sel)
@@ -1592,6 +2202,20 @@ class SlideScene(QGraphicsScene):
             return super().keyPressEvent(e)
         k = e.key()
         step = 10 if e.modifiers() & Qt.ShiftModifier else 1
+        if self.ff is not None and k in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Backspace, Qt.Key_Delete):
+            if k in (Qt.Key_Return, Qt.Key_Enter):
+                self.ff_finish(True)
+            else:
+                self.ff_undo_point()
+            e.accept()
+            return
+        if self.pe is not None and k in (Qt.Key_Delete, Qt.Key_Backspace, Qt.Key_Return, Qt.Key_Enter):
+            if k in (Qt.Key_Return, Qt.Key_Enter):
+                self.stop_point_edit()
+            else:
+                self.pe_delete()
+            e.accept()
+            return
         if k in (Qt.Key_Delete, Qt.Key_Backspace):
             self.delete_selected()
         elif k == Qt.Key_Left:
